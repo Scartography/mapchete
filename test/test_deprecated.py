@@ -10,10 +10,6 @@ def test_parse_deprecated(deprecated_params):
     with pytest.deprecated_call():
         mp = mapchete.open(deprecated_params.dict)
     with pytest.deprecated_call():
-        assert mp.config.process_bounds() == mp.config.bounds_at_zoom()
-    with pytest.deprecated_call():
-        assert mp.config.process_area() == mp.config.process_area()
-    with pytest.deprecated_call():
         assert mp.config.at_zoom(5) == mp.config.params_at_zoom(5)
     with pytest.deprecated_call():
         assert mp.config.inputs == mp.config.input
@@ -23,8 +19,6 @@ def test_parse_deprecated(deprecated_params):
         assert mp.config.metatiling == mp.config.process_pyramid.metatiling
     with pytest.deprecated_call():
         assert mp.config.pixelbuffer == mp.config.process_pyramid.pixelbuffer
-    with pytest.deprecated_call():
-        assert mp.config.process_file
 
 
 def test_parse_deprecated_zooms(deprecated_params):
@@ -33,13 +27,6 @@ def test_parse_deprecated_zooms(deprecated_params):
     with pytest.deprecated_call():
         with mapchete.open(deprecated_params.dict) as mp:
             assert mp.config.zoom_levels == list(range(0, 6))
-
-
-def test_deprecated_process_class(deprecated_params):
-    deprecated_params.dict.update(process_file="old_style_process.py")
-    with pytest.deprecated_call():
-        with pytest.raises(MapcheteProcessImportError):
-            mapchete.open(deprecated_params.dict)
 
 
 def test_deprecated_open_kwarg(mapchete_input):

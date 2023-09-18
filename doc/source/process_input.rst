@@ -86,6 +86,49 @@ granules, where bands are stored in separate files:
             green: path/to/B03.jp2
             blue: path/to/B02.jp2
 
+In case the inputs are stored on separate storages with individual access settings,
+they can be provided in a `storage_options` mapping:
+
+**Example:**
+
+.. code-block:: yaml
+
+    input:
+        foo:
+            format: raster_file
+            path: s3://bucket1/image.tif
+            storage_options:
+                AWS_ACCESS_KEY_ID: some_key_id
+                AWS_SECRET_ACCESS_KEY: some_key_secret
+        foo2:
+            format: raster_file
+            path: s3://bucket2/image.tif
+            storage_options:
+                AWS_ACCESS_KEY_ID: some_other_key_id
+                AWS_SECRET_ACCESS_KEY: some_other_key_secret
+
+
+It is not recommended to put in access credatials as plain text into the configuration.
+It is also possible to point to environment variables instead of values:
+
+**Example:**
+
+.. code-block:: yaml
+
+    input:
+        foo:
+            format: raster_file
+            path: s3://bucket1/image.tif
+            storage_options:
+                AWS_ACCESS_KEY_ID: ${SOME_KEY_ID}
+                AWS_SECRET_ACCESS_KEY: ${SOME_KEY_SECRET}
+        foo2:
+            format: raster_file
+            path: s3://bucket2/image.tif
+            storage_options:
+                AWS_ACCESS_KEY_ID: ${SOME_OTHER_KEY_ID}
+                AWS_SECRET_ACCESS_KEY: ${SOME_OTHER_KEY_SECRET}
+
 
 TileDirectory inputs
 --------------------
@@ -93,6 +136,29 @@ TileDirectory inputs
 It is also possible to directly point to a ``TileDirectory`` output path from another
 mapchete process. This is very similar to provide a ``.mapchete`` file path but with the
 convenience to just refer to the path.
+
+
+**Example:**
+
+.. code-block:: yaml
+
+    input:
+        foo: path_to_tiledirectory
+
+Sometimes it can be beneficial to pass on some default values to a TileDirectory, such
+as the maximum zoom level available. In that case Mapchete knows to read data from this
+zoom level in case a process runs on a higher zoom.
+
+**Example:**
+
+.. code-block:: yaml
+
+    input:
+        foo:
+            format: TileDirectory
+            path: path_to_tiledirectory
+            resampling: bilinear
+            max_zoom: 8  # now data can be read also from e.g. zoom 9 and will be resampled
 
 
 -------------------------

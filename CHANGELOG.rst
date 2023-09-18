@@ -2,6 +2,309 @@
 Changelog
 #########
 
+
+---------------------
+2023.9.0 - 2023-09-05
+---------------------
+
+* packaging
+
+  * limit dependent versions to `"aiobotocore>=1.1.2,<=2.5.4"` and `"s3fs<2023.9.0"`
+
+* core
+
+  * make sure opened/written files are removed upon exception (#576)
+  * CLI: apply tiled-assets hack also to create-item CLI (#577)
+  * provide path schema to configure how tile paths are created (#581)
+  * `IndexedFeatures`: allow reprojection of object bounds to a target CRS (#585)
+
+
+---------------------
+2023.8.1 - 2023-08-09
+---------------------
+
+* packaging
+
+  * require `Shapely>=2.0.0` (#572)
+  * remmove `cached_property` package requirement (#573)
+  * add `isort` to pre-commit (#573)
+
+* core
+
+  * fix `ReferencedRaster.to_file()` on 2D arrays (#574)
+
+
+---------------------
+2023.8.0 - 2023-08-09
+---------------------
+
+* packaging
+
+  * add `pydantic<2.0.0` as dependency
+
+
+* CI
+
+  * also test on Python 3.11 (#562)
+
+* core
+
+  * enable adding default read parameters to TileDirectory input (#565)
+  * configuration schema (#564)
+
+    * add `pydantic<2.0.0` as dependency
+    * `mapchete.config.ProcessConfig` now defines the mapchete process configuration schema
+    * process function parameters should now go into the `process_parameters` section of the configuration
+    * add `mapchete.config.ProcessFunc` abstraction class to load and handle user process functions
+
+  * CLI: fix passing on storage options; add storage options to convert command (#568)
+  * update STACTA file schema to STAC 1.0.0 (#569)
+  * added `ReferencedRaster.to_file()` (#570)
+  * added `read_raster(tile=...)` kwarg to resample incoming raster (#570)
+
+
+---------------------
+2023.7.1 - 2023-07-18
+---------------------
+
+* core
+
+  * CLI: add promts to ease using mapchete create (#558)
+  * clip source tile to pyramid bounds before reprojecting to avoid bumping into antimeridian error (#561)
+
+
+---------------------
+2023.7.0 - 2023-07-04
+---------------------
+
+* core
+
+  * better handle dask CancelledErrors (#555) 
+  * fix copy() of larger files (#552) 
+  * fix STACTA read & add tests (#551)
+
+* packaging
+
+  * pin pystac version to 1.7.3 as it does not yet implement STAC version… 
+
+
+---------------------
+2023.6.5 - 2023-06-14
+---------------------
+
+* core
+
+  * pre-calculate effective area analog to effective bounds (#550)
+
+
+---------------------
+2023.6.4 - 2023-06-13
+---------------------
+
+* core
+
+  * `MPath`: don't store session objects; fix allowed extensions string (#549)
+
+* testing
+
+  * add pickling tests (#549)
+
+
+---------------------
+2023.6.3 - 2023-06-12
+---------------------
+
+* core
+
+  * allow `ReferencedRaster` to accept arrays with more dimensions than 3 (#548)
+  * `MPath.from_inp()`: allow parsing objects using `__fspath__` interface (#547)
+
+
+---------------------
+2023.6.2 - 2023-06-12
+---------------------
+
+* core
+
+  * don't let MPath.makedirs() decide whether to only create parent directories or not (#546)
+
+* testing
+
+  * ProcessFixture now processes all preprocessing tasks using SequentialExecutor (#546)
+
+
+---------------------
+2023.6.1 - 2023-06-06
+---------------------
+
+* core
+
+  * only try to generate endpoint URL for rio/fio Sessions if a custom endpoint URL was provided in the first place (#541)
+
+* testing
+
+  * add tests for AWS S3 raster file (#541)
+  * better catch pytest fixture errors if docker-compose is not running or AWS credentials are not set (#541)
+
+
+---------------------
+2023.6.0 - 2023-06-05
+---------------------
+
+* core
+
+  * allow providing values in mapchete configuration from environmental variables (e.g. `key: ${SOME_ENV_VAR}`) (#511)
+  * enable setting individual storage options for `fsspec` and other I/O modules (`rasterio`, `fiona`, ...) for each input and output (#511)
+  * introduce `mapchete.path` module including `MPath` class based on `os.PathLike` (#511)
+  * use `MPath` for all internal path representations (#511)
+  * introduce `mapchete.io.settings` module (#511)
+
+* allow range requests on serve (#539)
+
+* packaging
+
+  * run isort on imports (#538)
+
+* testing
+
+  * require and run `docker-compose` before tests to provide S3 and HTTP endpoints (#511)
+
+
+---------------------
+2023.4.1 - 2023-04-20
+---------------------
+
+* packaging
+
+  * add all `s3` extra dependencies to `complete`
+
+
+---------------------
+2023.4.0 - 2023-04-20
+---------------------
+
+* core
+
+  * `to_shape()`: enable handling full feature dicts in `__geo_interface__` (#531)
+  * add `object_geometry()` method, which works like `object_bounds()` (#531)
+  * add `types` module containing `Bounds` and `ZoomLevel` classes (#532)
+  * remove `validate_zoom()`
+  * `mapchete.io._misc.get_boto3_bucket()`: function is now deprecated
+  * `mapchete.io._geometry_operations.reproject_geometry`: account for new fiona transform_geom behavior
+  * replace remaining `boto3` bucket calls with `fsspec`
+  * `mapchete.io.raster`: use same logic to extract `FileNotFoundError` for `read_raster_window` and `read_raster_no_crs`; replace deprecated `IOError` with `OSError`
+
+* packaging
+
+  * remove direct `s3fs` dependency but keep `boto3` and `aiobotocore` as direct dependencies for `s3` extra
+
+* testing
+
+  * fix test case to reflect bug which prevents dask from updating overview tile using the task graph (#530)
+
+
+---------------------
+2023.1.1 - 2023-01-26
+---------------------
+
+* core
+
+  * use threaded concurrency on default when calling `mapchete cp` (#526)
+  * removing check whether preprocessing task result is already set to avoid random KeyErrors (#529)
+
+* testing
+
+  * add test cases for continue mode (#527)
+  * add test to eplicitly test rasterio_write functionality (#528)
+
+
+---------------------
+2023.1.0 - 2023-01-03
+---------------------
+
+* core
+
+  * use new `importlib.metadata` interface to select entry points (#521)
+  * add filename which caused read error to MapcheteIOError when calling `read_raster_window()` and `read_vector_window()` (#522)
+
+
+----------------------
+2022.12.1 - 2022-12-20
+----------------------
+
+* core
+
+  * always use dask executor if defined, even if there is only one task or worker (#517)
+  * try to provide more useful information if dask task exception cannot be recovered (#519)
+
+* CI
+
+  * schedule tests every monday and thursday (#518) 
+
+
+----------------------
+2022.12.0 - 2022-12-16
+----------------------
+
+* core
+
+  * extend capabilities of `mapchete.io.raster.ReferencedRaster` (#513)
+  * allow executing remote mapchete files (#514)
+  * adapt to `Shapely 2.0` (#515)
+
+* packaging
+
+  * replace `setuptools` with `hatch` (#516)
+
+
+----------------------
+2022.11.2 - 2022-11-30
+----------------------
+
+* core
+
+  * use group prefix for preprocessing tasks (#512)
+
+* CLI
+
+  * pass on `max_workers` to dask executor (#508)
+
+
+----------------------
+2022.11.1 - 2022-11-23
+----------------------
+
+* core
+
+  * dask `chunksize` and `max_submitted_tasks` fix (#506)
+
+
+----------------------
+2022.11.0 - 2022-11-21
+----------------------
+
+* core
+
+  * GTiff driver: force blocksize being int (#496)
+  * fix TileDirectory read error from exotic CRSes (#498)
+  * split up `raster.io.RasterioRemoteWriter` class to memory and tempfile subclasses (#500)
+  * make sure dask_compute_graph and dask_chunksize are passed on (#502)
+
+* CLI
+
+  * print task details also when using dask executor when `--verbose` flag is active (#501)
+
+* packaging
+
+  * exclude vulnerable rasterio dependency (#490)
+  * add python-dateutil to package requirements (#495)
+  * rename `master` branch to `main`
+
+* tests
+
+  * add Python 3.10 to tests
+
+
 ---------------------
 2022.9.1 - 2022-09-15
 ---------------------
@@ -16,9 +319,11 @@ Changelog
 ---------------------
 
 * core
+
   * adapt tiles_count() to handle new shapely behavior; use pytest.mark.parametrize for some tests
 
 * tests
+
   * make slowest tests faster; reuse DaskExecutor() where possible
 
 
@@ -27,6 +332,7 @@ Changelog
 ---------------------
 
 * core
+
   * extend capabilities of IndexedFeatures to detect geometries
   * reuse `FileSystem`` object if provided in `makedirs()``
   * add `object_bounds()` to determine object geometry bounds
@@ -270,6 +576,7 @@ Changelog
   * reduce code smells
 
 * package
+
   * fix ``http`` extra in ``setup.py``
 
 
@@ -363,7 +670,8 @@ Changelog
 
     * use `pyproj` to determine CRS bounds to clip geometries when reprojecting
     * enable geometry segmentation before geometry is clipped (`segmentize_on_clip=False` and `segmentize_fraction=100` args)
-  * suppress `rasterio` warnings when reading rasters (too many `rasterio.errors.NodataShadowWarning`s)
+
+  * suppress `rasterio` warnings when reading rasters (too many `rasterio.errors.NodataShadowWarning`)
 
 * packaging
 
@@ -591,6 +899,7 @@ Changelog
 * added ``--overviews`` and ``--overviews-resampling-method`` to ``mapchete convert``
 * fixed overview generation when output pixelbuffer was provided (#220)
 * remote reading fixes (#219)
+
   * add GDAL HTTP options
   * handle ``AccessDenied`` exception which could occur if after an ``RasterioIOError`` a check is run if the file even exists
 * increased required minimum NumPy version to 1.16

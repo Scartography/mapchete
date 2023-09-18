@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 """Command line utility to serve a Mapchete process."""
 
-import click
 import logging
 import logging.config
 import os
 import pkgutil
+
+import click
 from rasterio.io import MemoryFile
 
 import mapchete
 from mapchete.cli import options
+from mapchete.io import MPath
 from mapchete.tile import BufferedTilePyramid
 
 logger = logging.getLogger(__name__)
@@ -79,7 +81,9 @@ def create_app(
 
     app = Flask(__name__)
     mapchete_processes = {
-        os.path.splitext(os.path.basename(mapchete_file))[0]: mapchete.open(
+        str(
+            MPath.from_inp(MPath.from_inp(mapchete_file).name).without_suffix()
+        ): mapchete.open(
             mapchete_file,
             zoom=zoom,
             bounds=bounds,
@@ -164,12 +168,13 @@ def _tile_response(mp, web_tile, debug):
 
 
 def _valid_tile_response(mp, data):
-    from flask import send_file, make_response, jsonify
+    from flask import jsonify, make_response
+    from flask_rangerequest import RangeRequest
 
     out_data, mime_type = mp.config.output.for_web(data)
     logger.debug("create tile response %s", mime_type)
     if isinstance(out_data, MemoryFile):
-        response = make_response(send_file(out_data, mime_type))
+        return RangeRequest(out_data).make_response()
     elif isinstance(out_data, list):
         response = make_response(jsonify(data))
     else:

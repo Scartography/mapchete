@@ -2,17 +2,16 @@
 Baseclasses for all drivers using fiona for reading and writing data.
 """
 
-import fiona
-from fiona.errors import DriverError
 import logging
 import types
 
+from fiona.errors import DriverError
+
 from mapchete.config import validate_values
 from mapchete.formats import base
-from mapchete.io import get_boto3_bucket
+from mapchete.io import MPath, fiona_open
 from mapchete.io.vector import write_vector_window
 from mapchete.tile import BufferedTile
-
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +57,8 @@ class OutputDataReader(base.TileDirectoryOutputReader):
         process output : list
         """
         try:
-            with fiona.open(self.get_path(output_tile), "r") as src:
+            path = self.get_path(output_tile)
+            with fiona_open(path, "r") as src:
                 return list(src)
         except DriverError as e:
             for i in (
@@ -84,7 +84,7 @@ class OutputDataReader(base.TileDirectoryOutputReader):
         -------
         is_valid : bool
         """
-        validate_values(config, [("schema", dict), ("path", str)])
+        validate_values(config, [("schema", dict), ("path", (str, MPath))])
         validate_values(config["schema"], [("properties", dict), ("geometry", str)])
         if config["schema"]["geometry"] not in [
             "Geometry",
@@ -162,9 +162,6 @@ class OutputDataWriter(base.TileDirectoryOutputWriter, OutputDataReader):
         if not len(data):  # pragma: no cover
             logger.debug("no features to write")
         else:
-            # in case of S3 output, create an boto3 resource
-            bucket_resource = get_boto3_bucket(self._bucket) if self._bucket else None
-
             # Convert from process_tile to output_tiles
             for tile in self.pyramid.intersecting(process_tile):
                 out_path = self.get_path(tile)
@@ -176,7 +173,6 @@ class OutputDataWriter(base.TileDirectoryOutputWriter, OutputDataReader):
                     out_schema=self.output_params["schema"],
                     out_tile=out_tile,
                     out_path=out_path,
-                    bucket_resource=bucket_resource,
                     allow_multipart_geometries=(
                         self.output_params["schema"]["geometry"].startswith("Multi")
                     ),

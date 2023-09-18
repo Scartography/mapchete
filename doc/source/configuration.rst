@@ -54,15 +54,15 @@ level if necessary.
         min: 11
         max: 11
 
-    # free parameters
-    #################
-
-    some_integer_parameter: 12
-    some_float_parameter: 5.3
-    some_string_parameter:
-        zoom<=7: string1
-        zoom>7: string2
-    some_bool_parameter: true
+    # process function parameters
+    #############################
+    process_parameters:
+        some_integer_parameter: 12
+        some_float_parameter: 5.3
+        some_string_parameter:
+            zoom<=7: string1
+            zoom>7: string2
+        some_bool_parameter: true
 
 
 --------------------
@@ -194,11 +194,10 @@ method used to interpolate must be defined.
         higher: bilinear
 
 
------------------------
-User defined parameters
------------------------
+process_parameters
+==================
 
-All other entries used in the Mapchete file are considered user specific and can
+Entries under ```process_parameters`` are considered user specific and can
 be accessed using ``mp.params`` from within the Process class. ``mp.params``
 is a dictionary which contains all parameters.
 
@@ -272,3 +271,20 @@ This works likewise for input data:
             # if the current tile zoom is 10 or lower, features from
             # land_polygons_simplified.shp are returned, if the tile zoom
             # is 11 or higher, features from land_polygons.shp are returned
+
+
+-------------------------------------
+Parameters from environment variables
+-------------------------------------
+
+It is also possible to point to environment variables when defining a value. This can be handy for secrets (e.g. filesystem access parameters) which should not end up in the mapchete config as plain text.
+
+.. code-block:: yaml
+
+    input:
+        mosaic2:
+            format: TileDirectory
+            path: https://example.com/foo/
+            storage_options:
+                username: ${FOO_USER}
+                password: ${FOO_PW}

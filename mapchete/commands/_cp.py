@@ -1,25 +1,24 @@
 """Copy tiles between Tile Directories."""
 
 import logging
-from multiprocessing import cpu_count
-import os
-from typing import Callable, List, Tuple, Union
 import warnings
+from multiprocessing import cpu_count
+from typing import Callable, List, Tuple, Union
 
 from rasterio.crs import CRS
 from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
 
 import mapchete
-from mapchete.io import fs_from_path, tiles_exist, copy
+from mapchete.io import MPath, copy, tiles_exist
 from mapchete.io.vector import reproject_geometry
 
 logger = logging.getLogger(__name__)
 
 
 def cp(
-    src_tiledir: str,
-    dst_tiledir: str,
+    src_tiledir: Union[str, MPath],
+    dst_tiledir: Union[str, MPath],
     zoom: Union[int, List[int]] = None,
     area: Union[BaseGeometry, str, dict] = None,
     area_crs: Union[CRS, str] = None,
@@ -28,14 +27,14 @@ def cp(
     point: Tuple[float, float] = None,
     point_crs: Tuple[float, float] = None,
     overwrite: bool = False,
-    workers: int = None,
-    multi: int = None,
-    concurrency: str = None,
-    dask_scheduler: str = None,
+    workers: Union[int, None] = None,
+    multi: Union[int, None] = None,
+    concurrency: Union[str, None] = None,
+    dask_scheduler: Union[str, None] = None,
     dask_client=None,
-    src_fs_opts: dict = None,
-    dst_fs_opts: dict = None,
-    msg_callback: Callable = None,
+    src_fs_opts: Union[dict, None] = None,
+    dst_fs_opts: Union[dict, None] = None,
+    msg_callback: Union[Callable, None] = None,
     as_iterator: bool = False,
 ) -> mapchete.Job:
     """
@@ -113,8 +112,10 @@ def cp(
     if zoom is None:  # pragma: no cover
         raise ValueError("zoom level(s) required")
 
-    src_fs = fs_from_path(src_tiledir, **src_fs_opts)
-    dst_fs = fs_from_path(dst_tiledir, **dst_fs_opts)
+    src_tiledir = MPath.from_inp(src_tiledir, storage_options=src_fs_opts)
+    dst_tiledir = MPath.from_inp(dst_tiledir, storage_options=dst_fs_opts)
+    src_fs = src_tiledir.fs
+    dst_fs = dst_tiledir.fs
 
     # open source tile directory
     with mapchete.open(
@@ -131,8 +132,8 @@ def cp(
         tp = src_mp.config.output_pyramid
 
         # copy metadata to destination if necessary
-        src_metadata = os.path.join(src_tiledir, "metadata.json")
-        dst_metadata = os.path.join(dst_tiledir, "metadata.json")
+        src_metadata = src_tiledir / "metadata.json"
+        dst_metadata = dst_tiledir / "metadata.json"
         if not dst_fs.exists(dst_metadata):
             msg = f"copy {src_metadata} to {dst_metadata}"
             logger.debug(msg)

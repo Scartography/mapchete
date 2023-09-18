@@ -1,20 +1,18 @@
-from collections import OrderedDict
 import datetime
 import logging
+from collections import OrderedDict
+
 import numpy as np
 import numpy.ma as ma
-import os
 from pyproj import CRS
 from shapely.geometry import box, mapping
 
-from tilematrix._funcs import Bounds
-
 from mapchete.errors import ReprojectionFailed
-from mapchete.io import makedirs
+from mapchete.io import MPath
 from mapchete.io.raster import write_raster_window
 from mapchete.io.vector import reproject_geometry
 from mapchete.tile import BufferedTilePyramid
-
+from mapchete.types import Bounds
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +49,7 @@ def tile_directory_stac_item(
     bounds=None,
     bounds_crs=None,
     bands_type="image/tiff; application=geotiff",
+    band_asset_template="{zoom}/{row}/{col}.tif",
     crs_unit_to_meter=1,
 ):
     """
@@ -95,13 +94,15 @@ def tile_directory_stac_item(
         raise ImportError(
             "dependencies for extra mapchete[stac] is required for this feature"
         )
-
     if item_id is None:
         raise ValueError("item_id must be set")
     if zoom_levels is None:
         raise ValueError("zoom_levels must be set")
     if tile_pyramid is None:
         raise ValueError("tile_pyramid must be set")
+
+    asset_basepath = MPath.from_inp(asset_basepath) if asset_basepath else None
+    item_path = MPath.from_inp(item_path) if item_path else None
 
     item_metadata = _cleanup_datetime(item_metadata or {})
     timestamp = (
@@ -110,17 +111,22 @@ def tile_directory_stac_item(
         or str(datetime.datetime.utcnow())
     )
     tp_grid = tile_pyramid.grid.type
-    bands_schema = "{TileMatrix}/{TileRow}/{TileCol}.tif"
+
     # thumbnail_href = thumbnail_href or "0/0/0.tif"
     # thumbnail_type = thumbnail_type or "image/tiff; application=geotiff"
+    # replace zoom, row and col names with STAC tiled-assets definition
+    band_asset_template = (
+        band_asset_template.replace("{zoom}", "{TileMatrix}")
+        .replace("{row}", "{TileRow}")
+        .replace("{col}", "{TileCol}")
+        .replace("{extension}", "tif")
+    )
     if asset_basepath:
-        bands_schema = os.path.join(asset_basepath, bands_schema)
-        # thumbnail_href = os.path.join(asset_basepath, thumbnail_href)
+        band_asset_template = asset_basepath / band_asset_template
     elif not relative_paths:
         if item_path is None:
             raise ValueError("either alternative_basepath or item_path must be set")
-        bands_schema = os.path.join(os.path.dirname(item_path), bands_schema)
-        # thumbnail_href = os.path.join(os.path.dirname(item_path), thumbnail_href)
+        band_asset_template = item_path.parent / band_asset_template
 
     # use bounds provided or fall back to tile pyramid bounds
     bounds = bounds or tile_pyramid.bounds
@@ -227,9 +233,14 @@ def tile_directory_stac_item(
         },
     }
 
-    stac_extensions = ["tiled-assets"]
+    stac_extensions = [
+        # official schema since STAC 1.0.0
+        "https://stac-extensions.github.io/tiled-assets/v1.0.0/schema.json",
+    ]
     if "eo:bands" in item_metadata:
-        stac_extensions.append("eo")
+        stac_extensions.append(
+            "https://stac-extensions.github.io/eo/v1.1.0/schema.json"
+        )
 
     out = {
         "stac_version": get_stac_version(),
@@ -245,7 +256,9 @@ def tile_directory_stac_item(
             "tiles:tile_matrix_links": {tile_matrix_set_identifier: tile_matrix_links},
             "tiles:tile_matrix_sets": {tile_matrix_set_identifier: tile_matrix_set},
         },
-        "asset_templates": {"bands": {"href": bands_schema, "type": bands_type}},
+        "asset_templates": {
+            "bands": {"href": str(band_asset_template), "type": bands_type}
+        },
         "assets": {
             # "thumbnail": {
             #     "href": thumbnail_href,
@@ -259,7 +272,7 @@ def tile_directory_stac_item(
         # out["assets"]["thumbnail"]["eo:bands"] = item_metadata["eo:bands"]
     out["links"] = item_metadata.get("links", [])
     if item_path:
-        out["links"].extend([{"rel": "self", "href": item_path}])
+        out["links"].extend([{"rel": "self", "href": str(item_path)}])
 
     return pystac.read_dict(out)
 
@@ -291,6 +304,7 @@ def update_tile_directory_stac_item(
     bounds=None,
     item_metadata=None,
     bands_type=None,
+    band_asset_template="{TileMatrix}/{TileRow}/{TileCol}.tif",
     crs_unit_to_meter=1,
 ):
     """
@@ -330,6 +344,7 @@ def update_tile_directory_stac_item(
     -------
     pystac.Item
     """
+    item_path = MPath.from_inp(item_path) if item_path else None
     # from existing item
     if item is not None:
         zoom_levels = zoom_levels or []
@@ -361,11 +376,12 @@ def update_tile_directory_stac_item(
         tile_pyramid=tile_pyramid,
         zoom_levels=zoom_levels,
         item_path=item_path,
-        asset_basepath=os.path.dirname(item_path) if item_path else None,
+        asset_basepath=item_path.parent if item_path else None,
         relative_paths=True,
         item_metadata=item_metadata,
         bounds=bounds,
         bands_type=bands_type,
+        band_asset_template=band_asset_template,
         crs_unit_to_meter=crs_unit_to_meter,
     )
 
@@ -373,7 +389,6 @@ def update_tile_directory_stac_item(
 def tile_pyramid_from_item(item):
     matrix_sets = item.properties.get("tiles:tile_matrix_sets")
     if matrix_sets:
-
         # find out grid
         wkss = next(iter(matrix_sets.keys()))
         for grid, properties in KNOWN_MATRIX_PROPERTIES.items():
@@ -448,14 +463,13 @@ def create_prototype_files(mp):
         prototype_tile = mp.config.output_pyramid.tile(zoom, 0, 0)
         tile_path = mp.config.output.get_path(prototype_tile)
         # if tile exists, skip
-        if mp.config.output.tiles_exist(output_tile=prototype_tile):
+        if tile_path.exists():
             logger.debug("prototype tile %s already exists", tile_path)
-            pass
         # if not, write empty tile
         else:
             logger.debug("creating prototype tile %s", tile_path)
             out_profile = mp.config.output.profile(prototype_tile)
-            makedirs(os.path.dirname(tile_path))
+            tile_path.parent.makedirs()
             write_raster_window(
                 in_tile=prototype_tile,
                 in_data=ma.masked_array(
@@ -471,3 +485,15 @@ def create_prototype_files(mp):
                 out_path=tile_path,
                 write_empty=True,
             )
+
+
+def tile_direcotry_item_to_dict(item) -> dict:
+    item_dict = item.to_dict()
+
+    # we have to add 'tiled-assets' to stac extensions in order to GDAL identify
+    # this file as STACTA dataset
+    stac_extensions = set(item_dict.get("stac_extensions", []))
+    stac_extensions.add("tiled-assets")
+    item_dict["stac_extensions"] = list(stac_extensions)
+
+    return item_dict

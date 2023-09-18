@@ -2,14 +2,15 @@
 """Test custom Mapchete errors."""
 
 
-import pytest
 from copy import deepcopy
 
+import pytest
+
 import mapchete
-from mapchete.config import MapcheteConfig, validate_values
-from mapchete._processing import Executor
-from mapchete.tile import BufferedTilePyramid
 from mapchete import errors
+from mapchete._processing import Executor
+from mapchete.config import MapcheteConfig, validate_values
+from mapchete.tile import BufferedTilePyramid
 
 
 def test_mapchete_init():
@@ -29,7 +30,7 @@ def test_execute(example_mapchete):
     """Mapchete execute() errors."""
     # in readonly mode
     with mapchete.open(example_mapchete.dict, mode="readonly") as mp:
-        with pytest.raises(ValueError):
+        with pytest.raises(AttributeError):
             mp.execute(next(mp.get_process_tiles()))
     # wrong tile type
     with mapchete.open(example_mapchete.dict) as mp:

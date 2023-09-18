@@ -1,19 +1,20 @@
 import json
-from packaging import version
+
 import pytest
 import rasterio
+from packaging import version
 from rasterio.errors import RasterioIOError
 from shapely.geometry import box, shape
 
 from mapchete.commands import execute
-from mapchete.io import fs_from_path
+from mapchete.io import rasterio_open
 from mapchete.io.vector import reproject_geometry
 from mapchete.stac import (
-    tile_directory_stac_item,
-    update_tile_directory_stac_item,
-    tile_pyramid_from_item,
-    zoom_levels_from_item,
     create_prototype_files,
+    tile_directory_stac_item,
+    tile_pyramid_from_item,
+    update_tile_directory_stac_item,
+    zoom_levels_from_item,
 )
 from mapchete.tile import BufferedTilePyramid
 
@@ -27,7 +28,10 @@ def test_wkss_geodetic():
     assert shape(item.geometry).difference(box(*tp.bounds)).is_empty
     assert item.bbox == list(tp.bounds)
     assert item.datetime
-    assert "tiled-assets" in item.stac_extensions
+    assert (
+        "https://stac-extensions.github.io/tiled-assets/v1.0.0/schema.json"
+        in item.stac_extensions
+    )
     assert "bands" in item.extra_fields["asset_templates"]
     assert "tiles:tile_matrix_links" in item.properties
     assert "tiles:tile_matrix_sets" in item.properties
@@ -45,7 +49,10 @@ def test_wkss_mercator():
     )
     assert item_geometry.difference(box(*tp.bounds)).is_empty
     assert item.datetime
-    assert "tiled-assets" in item.stac_extensions
+    assert (
+        "https://stac-extensions.github.io/tiled-assets/v1.0.0/schema.json"
+        in item.stac_extensions
+    )
     assert "bands" in item.extra_fields["asset_templates"]
     assert "tiles:tile_matrix_links" in item.properties
     assert "tiles:tile_matrix_sets" in item.properties
@@ -125,7 +132,10 @@ def test_tiled_asset_eo_bands_metadata():
         zoom_levels=range(6),
         item_metadata={"eo:bands": {"foo": "bar"}},
     )
-    assert "eo" in item.to_dict()["stac_extensions"]
+    assert (
+        "https://stac-extensions.github.io/eo/v1.1.0/schema.json"
+        in item.to_dict()["stac_extensions"]
+    )
     assert "eo:bands" in item.to_dict()["asset_templates"]["bands"]
 
 
@@ -262,14 +272,16 @@ def test_create_prototype_file(example_mapchete):
 
     # read STACTA with rasterio and expect an exception
     stac_path = example_mapchete.mp().config.output.stac_path
-    assert fs_from_path(stac_path).exists(stac_path)
+    assert stac_path.exists()
 
     with pytest.raises(RasterioIOError):
-        rasterio.open(stac_path)
+        with rasterio_open(stac_path):
+            pass
 
     # create prototype file and assert reading is possible
     create_prototype_files(example_mapchete.mp())
-    rasterio.open(stac_path)
+    with rasterio_open(stac_path):
+        pass
 
 
 @pytest.mark.skipif(
@@ -282,8 +294,9 @@ def test_create_prototype_file_exists(cleantopo_tl):
 
     # read STACTA with rasterio and expect an exception
     stac_path = cleantopo_tl.mp().config.output.stac_path
-    assert fs_from_path(stac_path).exists(stac_path)
+    assert stac_path.exists()
 
     # create prototype file and assert reading is possible
     create_prototype_files(cleantopo_tl.mp())
-    rasterio.open(stac_path)
+    with rasterio_open(stac_path):
+        pass

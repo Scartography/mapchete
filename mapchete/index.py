@@ -19,26 +19,29 @@ generate GPKG files 3.gpkg, 4.gpkg and 5.gpkg for zoom levels 3, 4 and 5.
 
 """
 
-from contextlib import ExitStack
-from copy import deepcopy
-import fiona
 import logging
 import operator
-import os
+import xml.etree.ElementTree as ET
+from contextlib import ExitStack
+from copy import deepcopy
+from xml.dom import minidom
+
+import fiona
 from rasterio.dtypes import _gdal_typename
 from shapely.geometry import mapping
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
 
 from mapchete.config import get_zoom_levels
 from mapchete.io import (
+    MPath,
+    fiona_open,
+    fs_from_path,
     path_exists,
-    path_is_remote,
-    get_boto3_bucket,
     raster,
     relative_path,
     tiles_exist,
+    vector,
 )
+from mapchete.path import batch_sort_property
 
 logger = logging.getLogger(__name__)
 
@@ -154,17 +157,25 @@ def zoom_index_gen(
 
             if tile:
                 output_tiles_batches = mp.config.output_pyramid.tiles_from_bounds(
-                    mp.config.process_pyramid.tile(*tile).bounds, zoom, batch_by="row"
+                    mp.config.process_pyramid.tile(*tile).bounds,
+                    zoom,
+                    batch_by=batch_sort_property(
+                        mp.config.output_reader.tile_path_schema
+                    ),
                 )
             else:
                 output_tiles_batches = mp.config.output_pyramid.tiles_from_geom(
-                    mp.config.area_at_zoom(zoom), zoom, batch_by="row", exact=True
+                    mp.config.area_at_zoom(zoom),
+                    zoom,
+                    batch_by=batch_sort_property(
+                        mp.config.output_reader.tile_path_schema
+                    ),
+                    exact=True,
                 )
 
             for output_tile, exists in tiles_exist(
                 mp.config, output_tiles_batches=output_tiles_batches
             ):
-
                 tile_path = _tile_path(
                     orig_path=mp.config.output.get_path(output_tile),
                     basepath=basepath,
@@ -188,68 +199,85 @@ def zoom_index_gen(
 
 
 def _index_file_path(out_dir, zoom, ext):
-    return os.path.join(out_dir, str(zoom) + "." + ext)
+    return MPath.from_inp(out_dir) / f"{str(zoom)}.{ext}"
 
 
 def _tile_path(orig_path=None, basepath=None, for_gdal=True):
     path = (
-        os.path.join(basepath, "/".join(orig_path.split("/")[-3:]))
+        MPath.from_inp(basepath).joinpath(*orig_path.elements[-3:])
         if basepath
-        else orig_path
+        else MPath.from_inp(orig_path)
     )
-    if for_gdal and path.startswith(("http://", "https://")):
-        return "/vsicurl/" + path
-    elif for_gdal and path.startswith("s3://"):
-        return path.replace("s3://", "/vsis3/")
+    if for_gdal:
+        return path.as_gdal_str()
     else:
-        return path
+        return str(path)
 
 
 class VectorFileWriter:
     """Writes GeoJSON or GeoPackage files."""
 
     def __init__(self, out_path=None, crs=None, fieldname=None, driver=None):
-        self._append = "a" in fiona.supported_drivers[driver]
+        self.path = MPath.from_inp(out_path)
+        self._append = (
+            "a" in fiona.supported_drivers[driver] and not self.path.is_remote()
+        )
         logger.debug("initialize %s writer with append %s", driver, self._append)
-        self.path = out_path
         self.driver = driver
         self.fieldname = fieldname
         self.new_entries = 0
-        schema = deepcopy(spatial_schema)
-        schema["properties"][fieldname] = "str:254"
-
-        if self._append:
-            if os.path.isfile(self.path):
-                logger.debug("read existing entries")
-                with fiona.open(self.path, "r") as src:
-                    self._existing = {f["properties"]["tile_id"]: f for f in src}
-                self.sink = fiona.open(self.path, "a")
-            else:
-                self.sink = fiona.open(
-                    self.path, "w", driver=self.driver, crs=crs.to_dict(), schema=schema
-                )
-                self._existing = {}
-        else:  # pragma: no cover
-            if os.path.isfile(self.path):
-                logger.debug("read existing entries")
-                with fiona.open(self.path, "r") as src:
-                    self._existing = {f["properties"]["tile_id"]: f for f in src}
-                fiona.remove(self.path, driver=driver)
-            else:
-                self._existing = {}
-            self.sink = fiona.open(
-                self.path, "w", driver=self.driver, crs=crs, schema=schema
-            )
-            self.sink.writerecords(self._existing.values())
+        self.schema = deepcopy(spatial_schema)
+        self.schema["properties"][fieldname] = "str:254"
+        self.crs = crs
 
     def __repr__(self):
         return "VectorFileWriter(%s)" % self.path
 
     def __enter__(self):
+        self.es = ExitStack().__enter__()
+        if self._append:
+            if self.path.exists():
+                logger.debug("read existing entries")
+                with fiona_open(self.path, "r") as src:
+                    self._existing = {f["properties"]["tile_id"]: f for f in src}
+                self.sink = self.es.enter_context(vector.fiona_write(self.path, "a"))
+            else:
+                self.sink = self.es.enter_context(
+                    vector.fiona_write(
+                        self.path,
+                        "w",
+                        driver=self.driver,
+                        crs=self.crs.to_dict(),
+                        schema=self.schema,
+                    )
+                )
+                self._existing = {}
+        else:  # pragma: no cover
+            if self.path.exists():
+                logger.debug("read existing entries")
+                with fiona_open(self.path, "r") as src:
+                    self._existing = {f["properties"]["tile_id"]: f for f in src}
+                if not self.path.is_remote():
+                    fiona.remove(str(self.path), driver=self.driver)
+            else:
+                self._existing = {}
+            self.sink = self.es.enter_context(
+                vector.fiona_write(
+                    self.path,
+                    "w",
+                    driver=self.driver,
+                    crs=self.crs,
+                    schema=self.schema,
+                )
+            )
+            self.sink.writerecords(self._existing.values())
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        try:
+            self.es.__exit__(exc_type, exc_value, exc_traceback)
+        finally:
+            self.close()
 
     def write(self, tile, path):
         if not self.entry_exists(tile=tile):
@@ -283,31 +311,15 @@ class TextFileWriter:
 
     def __init__(self, out_path=None):
         self.path = out_path
-        self._bucket = (
-            self.path.split("/")[2] if self.path.startswith("s3://") else None
-        )
-        self.bucket_resource = get_boto3_bucket(self._bucket) if self._bucket else None
         logger.debug("initialize TXT writer")
+        self.fs = fs_from_path(out_path)
         if path_exists(self.path):
-            if self._bucket:
-                key = "/".join(self.path.split("/")[3:])
-                for obj in self.bucket_resource.objects.filter(Prefix=key):
-                    if obj.key == key:
-                        self._existing = {
-                            l + "\n"
-                            for l in obj.get()["Body"].read().decode().split("\n")
-                            if l
-                        }
-            else:
-                with open(self.path) as src:
-                    self._existing = {l for l in src}
+            with self.fs.open(self.path, "r") as src:
+                self._existing = {l for l in src.readlines()}
         else:
             self._existing = {}
         self.new_entries = 0
-        if self._bucket:
-            self.sink = ""
-        else:
-            self.sink = open(self.path, "w")
+        self.sink = self.fs.open(self.path, "w")
         for l in self._existing:
             self._write_line(l)
 
@@ -321,10 +333,7 @@ class TextFileWriter:
         self.close()
 
     def _write_line(self, line):
-        if self._bucket:
-            self.sink += line
-        else:
-            self.sink.write(line)
+        self.sink.write(line)
 
     def write(self, tile, path):
         if not self.entry_exists(path=path):
@@ -339,12 +348,7 @@ class TextFileWriter:
 
     def close(self):
         logger.debug("%s new entries in %s", self.new_entries, self)
-        if self._bucket:
-            key = "/".join(self.path.split("/")[3:])
-            logger.debug("upload %s", key)
-            self.bucket_resource.put_object(Key=key, Body=self.sink)
-        else:
-            self.sink.close()
+        self.sink.close()
 
 
 class VRTFileWriter:
@@ -357,25 +361,13 @@ class VRTFileWriter:
         self.path = out_path
         self._tp = out_pyramid
         self._output = output
-        self._bucket = (
-            self.path.split("/")[2] if self.path.startswith("s3://") else None
-        )
-        self.bucket_resource = get_boto3_bucket(self._bucket) if self._bucket else None
+        self.fs = fs_from_path(out_path)
         logger.debug("initialize VRT writer for %s", self.path)
         if path_exists(self.path):
-            if self._bucket:
-                key = "/".join(self.path.split("/")[3:])
-                for obj in self.bucket_resource.objects.filter(Prefix=key):
-                    if obj.key == key:
-                        self._existing = {
-                            k: v
-                            for k, v in self._xml_to_entries(
-                                obj.get()["Body"].read().decode()
-                            )
-                        }
-            else:
-                with open(self.path) as src:
-                    self._existing = {k: v for k, v in self._xml_to_entries(src.read())}
+            with self.fs.open(self.path) as src:
+                self._existing = {
+                    k: MPath.from_inp(v) for k, v in self._xml_to_entries(src.read())
+                }
         else:
             self._existing = {}
         logger.debug("%s existing entries", len(self._existing))
@@ -392,10 +384,12 @@ class VRTFileWriter:
         self.close()
 
     def _path_to_tile(self, path):
-        return self._tp.tile(*map(int, os.path.splitext(path)[0].split("/")[-3:]))
+        return self._tp.tile(
+            *map(int, MPath.from_inp(path).without_suffix().elements[-3:])
+        )
 
     def _add_entry(self, tile=None, path=None):
-        self._new[tile] = path
+        self._new[tile] = MPath.from_inp(path)
 
     def _xml_to_entries(self, xml_string):
         for entry in next(
@@ -411,7 +405,7 @@ class VRTFileWriter:
             self.new_entries += 1
 
     def entry_exists(self, tile=None, path=None):
-        path = relative_path(path=path, base_dir=os.path.split(self.path)[0])
+        path = relative_path(path=path, base_dir=self.path.dirname)
         exists = path in self._existing
         logger.debug("tile %s with path %s exists: %s", tile, path, exists)
         return exists
@@ -446,11 +440,9 @@ class VRTFileWriter:
                         E.ComplexSource(
                             E.SourceFilename(
                                 _tile_path(orig_path=path, for_gdal=True)
-                                if path_is_remote(path)
-                                else relative_path(
-                                    path=path, base_dir=os.path.split(self.path)[0]
-                                ),
-                                relativeToVRT="0" if path_is_remote(path) else "1",
+                                if path.is_remote()
+                                else str(path.relative_path(start=self.path.dirname)),
+                                relativeToVRT="0" if path.is_remote() else "1",
                             ),
                             E.SourceBand(str(b_idx)),
                             E.SourceProperties(
@@ -512,11 +504,6 @@ class VRTFileWriter:
         )
         # generate pretty XML and write
         xmlstr = minidom.parseString(ET.tostring(vrt)).toprettyxml(indent="  ")
-        if self._bucket:
-            key = "/".join(self.path.split("/")[3:])
-            logger.debug("upload %s", key)
-            self.bucket_resource.put_object(Key=key, Body=xmlstr)
-        else:
-            logger.debug("write to %s", self.path)
-            with open(self.path, "w") as dst:
-                dst.write(xmlstr)
+        logger.debug("write to %s", self.path)
+        with self.fs.open(self.path, "w") as dst:
+            dst.write(xmlstr)

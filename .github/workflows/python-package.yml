@@ -5,9 +5,11 @@ name: Python package test
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
+    branches: [main]
+  schedule:
+    - cron: '0 8 * * 1,4'
 
 jobs:
   test:
@@ -16,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.8", "3.9", "3.10"]
+        python-version: ["3.8", "3.9", "3.10", "3.11"]
         os: ["ubuntu-20.04", "ubuntu-22.04"]
 
     steps:
@@ -35,8 +37,9 @@ jobs:
           sudo apt-get -y update
           sudo apt-get install -y gdal-bin python-tk libgdal-dev libproj-dev libgeos-dev
           python -m pip install --upgrade pip wheel
-          pip install -r test/requirements.txt -r requirements.txt
           pip install -e .[complete]
+          pip install -r test/requirements.txt
+          pip freeze
 
       - name: Lint with flake8
         run: |
@@ -44,6 +47,10 @@ jobs:
           flake8 mapchete --count --select=E9,F63,F7,F82 --show-source --statistics
           # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
           flake8 mapchete --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Start containers
+        run: |
+          docker-compose -f "test/docker-compose.yml" up -d
 
       - name: Test with pytest
         env:
@@ -59,3 +66,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           coveralls --service=github
+
+      - name: Stop containers
+        if: always()
+        run: docker-compose -f "test/docker-compose.yml" down

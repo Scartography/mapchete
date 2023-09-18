@@ -1,16 +1,14 @@
 """Create index for process output."""
 
+import logging
+
 import click
 import click_spinner
-import logging
-import os
-import sys
 import tqdm
 
 import mapchete
-from mapchete.cli import options
 from mapchete import commands
-
+from mapchete.cli import options
 
 # workaround for https://github.com/tqdm/tqdm/issues/481
 tqdm.monitor_interval = 0

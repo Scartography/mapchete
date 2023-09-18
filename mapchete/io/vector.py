@@ -1,32 +1,34 @@
 """Functions handling vector data."""
 
-from contextlib import ExitStack
-import os
 import logging
+import warnings
+from contextlib import ExitStack, contextmanager
+from itertools import chain
+from tempfile import NamedTemporaryFile
+from typing import Any, Union
+
 import fiona
 from fiona.errors import DriverError, FionaError, FionaValueError
 from fiona.io import MemoryFile
-import json
-from retry import retry
 from rasterio.crs import CRS
-from shapely.geometry import box, mapping, shape
+from retry import retry
 from shapely.errors import TopologicalError
+from shapely.geometry import base, box, mapping, shape
 from tilematrix import clip_geometry_to_srs_bounds
-from tilematrix._funcs import Bounds
-from itertools import chain
-import warnings
 
-from mapchete.errors import NoGeoError, MapcheteIOError
-from mapchete.io._misc import MAPCHETE_IO_RETRY_SETTINGS
-from mapchete.io._path import fs_from_path, path_exists, makedirs, copy
+from mapchete.errors import MapcheteIOError, NoCRSError, NoGeoError
+from mapchete.io import copy
 from mapchete.io._geometry_operations import (
+    _repair,
+    clean_geometry_type,
+    multipart_to_singleparts,
     reproject_geometry,
     segmentize_geometry,
     to_shape,
-    multipart_to_singleparts,
-    clean_geometry_type,
-    _repair,
 )
+from mapchete.io.settings import MAPCHETE_IO_RETRY_SETTINGS
+from mapchete.path import MPath, fs_from_path, path_exists
+from mapchete.types import Bounds
 from mapchete.validate import validate_bounds
 
 __all__ = [
@@ -38,6 +40,83 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def fiona_open(path, mode="r", **kwargs):
+    """Call fiona.open but set environment correctly and return custom writer if needed."""
+    path = MPath.from_inp(path)
+
+    if "w" in mode:
+        with fiona_write(path, mode=mode, **kwargs) as dst:
+            yield dst
+
+    else:
+        with fiona_read(path, mode=mode, **kwargs) as src:
+            yield src
+
+
+@contextmanager
+def fiona_read(path, mode="r", **kwargs):
+    """
+    Wrapper around fiona.open but fiona.Env is set according to path properties.
+    """
+    path = MPath.from_inp(path)
+
+    with path.fio_env() as env:
+        logger.debug("reading %s with GDAL options %s", str(path), env.options)
+        with fiona.open(str(path), mode=mode, **kwargs) as src:
+            yield src
+
+
+@contextmanager
+def fiona_write(path, mode="w", fs=None, in_memory=True, *args, **kwargs):
+    """
+    Wrap fiona.open() but handle bucket upload if path is remote.
+
+    Parameters
+    ----------
+    path : str or MPath
+        Path to write to.
+    mode : str
+        One of the fiona.open() modes.
+    fs : fsspec.FileSystem
+        Target filesystem.
+    in_memory : bool
+        On remote output store an in-memory file instead of writing to a tempfile.
+    args : list
+        Arguments to be passed on to fiona.open()
+    kwargs : dict
+        Keyword arguments to be passed on to fiona.open()
+
+    Returns
+    -------
+    FionaRemoteWriter if target is remote, otherwise return fiona.open().
+    """
+    path = MPath.from_inp(path)
+
+    try:
+        if path.is_remote():
+            if "s3" in path.protocols:  # pragma: no cover
+                try:
+                    import boto3
+                except ImportError:
+                    raise ImportError("please install [s3] extra to write remote files")
+            with FionaRemoteWriter(
+                path, fs=fs, in_memory=in_memory, *args, **kwargs
+            ) as dst:
+                yield dst
+        else:
+            with path.fio_env() as env:
+                logger.debug("writing %s with GDAL options %s", str(path), env.options)
+                path.parent.makedirs(exist_ok=True)
+                with fiona.open(str(path), mode=mode, *args, **kwargs) as dst:
+                    yield dst
+    except Exception as exc:  # pragma: no cover
+        logger.exception(exc)
+        logger.debug("remove %s ...", str(path))
+        path.rm(ignore_errors=True)
+        raise
 
 
 def read_vector_window(
@@ -90,28 +169,33 @@ def read_vector_window(
 
 
 def _read_vector_window(inp, tile, validity_check=True, clip_to_crs_bounds=False):
-    if tile.pixelbuffer and tile.is_on_edge():
-        return chain.from_iterable(
-            _get_reprojected_features(
+    try:
+        if tile.pixelbuffer and tile.is_on_edge():
+            return chain.from_iterable(
+                _get_reprojected_features(
+                    inp=inp,
+                    dst_bounds=bbox.bounds,
+                    dst_crs=tile.crs,
+                    validity_check=validity_check,
+                    clip_to_crs_bounds=clip_to_crs_bounds,
+                )
+                for bbox in clip_geometry_to_srs_bounds(
+                    tile.bbox, tile.tile_pyramid, multipart=True
+                )
+            )
+        else:
+            features = _get_reprojected_features(
                 inp=inp,
-                dst_bounds=bbox.bounds,
+                dst_bounds=tile.bounds,
                 dst_crs=tile.crs,
                 validity_check=validity_check,
                 clip_to_crs_bounds=clip_to_crs_bounds,
             )
-            for bbox in clip_geometry_to_srs_bounds(
-                tile.bbox, tile.tile_pyramid, multipart=True
-            )
-        )
-    else:
-        features = _get_reprojected_features(
-            inp=inp,
-            dst_bounds=tile.bounds,
-            dst_crs=tile.crs,
-            validity_check=validity_check,
-            clip_to_crs_bounds=clip_to_crs_bounds,
-        )
-        return features
+            return features
+    except FileNotFoundError:  # pragma: no cover
+        raise
+    except Exception as exc:  # pragma: no cover
+        raise IOError(f"failed to read {inp}") from exc
 
 
 def write_vector_window(
@@ -120,8 +204,8 @@ def write_vector_window(
     out_schema=None,
     out_tile=None,
     out_path=None,
-    bucket_resource=None,
     allow_multipart_geometries=True,
+    **kwargs,
 ):
     """
     Write features to file.
@@ -141,11 +225,8 @@ def write_vector_window(
         output path for file
     """
     # Delete existing file.
-    try:
-        os.remove(out_path)
-    except OSError:
-        pass
-
+    out_path = MPath.from_inp(out_path)
+    out_path.rm(ignore_errors=True)
     out_features = []
     for feature in in_data:
         try:
@@ -181,13 +262,10 @@ def write_vector_window(
                     driver=out_driver,
                 ) as memfile:
                     logger.debug((out_tile.id, "write tile", out_path))
-                    with fs_from_path(out_path).open(out_path, "wb") as dst:
+                    with out_path.open("wb") as dst:
                         dst.write(memfile)
             else:  # pragma: no cover
-                # write data to local file
-                # this part is not covered by tests as we now try to let fiona directly
-                # write to S3
-                with fiona.open(
+                with fiona_open(
                     out_path,
                     "w",
                     schema=out_schema,
@@ -257,9 +335,9 @@ def _get_reprojected_features(
 ):
     logger.debug("reading %s", inp)
     with ExitStack() as exit_stack:
-        if isinstance(inp, str):
+        if isinstance(inp, (str, MPath)):
             try:
-                src = exit_stack.enter_context(fiona.open(inp, "r"))
+                src = exit_stack.enter_context(fiona_open(inp, "r"))
                 src_crs = CRS(src.crs)
             except Exception as e:
                 # fiona errors which indicate file does not exist
@@ -301,7 +379,6 @@ def _get_reprojected_features(
                 validity_check=True,
             )
         for feature in src.filter(bbox=dst_bbox.bounds):
-
             try:
                 # check validity
                 original_geom = _repair(to_shape(feature["geometry"]))
@@ -332,27 +409,7 @@ def _get_reprojected_features(
 
 
 def bounds_intersect(bounds1, bounds2):
-    bounds1 = validate_bounds(bounds1)
-    bounds2 = validate_bounds(bounds2)
-    horizontal = (
-        # partial overlap
-        bounds1.left <= bounds2.left <= bounds1.right
-        or bounds1.left <= bounds2.right <= bounds1.right
-        # bounds 1 within bounds 2
-        or bounds2.left <= bounds1.left < bounds1.right <= bounds2.right
-        # bounds 2 within bounds 1
-        or bounds1.left <= bounds2.left < bounds2.right <= bounds1.right
-    )
-    vertical = (
-        # partial overlap
-        bounds1.bottom <= bounds2.bottom <= bounds1.top
-        or bounds1.bottom <= bounds2.top <= bounds1.top
-        # bounds 1 within bounds 2
-        or bounds2.bottom <= bounds1.bottom < bounds1.top <= bounds2.top
-        # bounds 2 within bounds 1
-        or bounds1.bottom <= bounds2.bottom < bounds2.top <= bounds1.top
-    )
-    return horizontal and vertical
+    return Bounds.from_inp(bounds1).intersects(bounds2)
 
 
 class FakeIndex:
@@ -407,7 +464,11 @@ class IndexedFeatures:
                 id_ = self._get_feature_id(feature)
             self._items[id_] = feature
             try:
-                bounds = object_bounds(feature)
+                try:
+                    bounds = object_bounds(feature, dst_crs=crs)
+                except NoCRSError as exc:
+                    logger.warning(str(exc))
+                    bounds = object_bounds(feature)
             except NoGeoError:
                 if allow_non_geo_objects:
                     bounds = None
@@ -420,7 +481,7 @@ class IndexedFeatures:
                 self._index.insert(id_, bounds)
 
     def __repr__(self):  # pragma: no cover
-        return f"IndexedFeatures(features={len(self)}, index={self._index.__repr__()})"
+        return f"IndexedFeatures(features={len(self)}, index={self._index.__repr__()}, bounds={self.bounds})"
 
     def __len__(self):
         return len(self._items)
@@ -487,28 +548,63 @@ class IndexedFeatures:
                 raise TypeError("features need to have an id or have to be hashable")
 
 
-def object_bounds(obj) -> Bounds:
+def object_geometry(obj) -> base.BaseGeometry:
+    """
+    Determine geometry from object if available.
+    """
+    try:
+        if hasattr(obj, "__geo_interface__"):
+            return to_shape(obj)
+        elif hasattr(obj, "geometry"):
+            return to_shape(obj.geometry)
+        elif hasattr(obj, "get") and obj.get("geometry"):
+            return to_shape(obj["geometry"])
+        else:
+            raise TypeError("no geometry")
+    except Exception as exc:
+        logger.exception(exc)
+        raise NoGeoError(f"cannot determine geometry from object: {obj}") from exc
+
+
+def object_bounds(obj: Any, dst_crs: Union[CRS, None] = None) -> Bounds:
     """
     Determine geographic bounds from object if available.
+
+    If dst_crs is defined, bounds will be reprojected in case the object holds CRS information.
     """
     try:
         if hasattr(obj, "bounds"):
-            return validate_bounds(obj.bounds)
-        elif hasattr(obj, "__geo_interface__"):
-            return validate_bounds(shape(obj).bounds)
-        elif hasattr(obj, "geometry"):
-            return validate_bounds(to_shape(obj.geometry).bounds)
+            bounds = validate_bounds(obj.bounds)
         elif hasattr(obj, "bbox"):
-            return validate_bounds(obj.bbox)
-        elif obj.get("bounds"):
-            return validate_bounds(obj["bounds"])
-        elif obj.get("geometry"):
-            return validate_bounds(to_shape(obj["geometry"]).bounds)
+            bounds = validate_bounds(obj.bbox)
+        elif hasattr(obj, "get") and obj.get("bounds"):
+            bounds = validate_bounds(obj["bounds"])
         else:
-            raise TypeError("no bounds")
+            bounds = validate_bounds(object_geometry(obj).bounds)
     except Exception as exc:
         logger.exception(exc)
         raise NoGeoError(f"cannot determine bounds from object: {obj}") from exc
+
+    if dst_crs:
+        return Bounds.from_inp(
+            reproject_geometry(shape(bounds), src_crs=object_crs(obj), dst_crs=dst_crs)
+        )
+
+    return bounds
+
+
+def object_crs(obj: Any) -> CRS:
+    """Determine CRS from an object."""
+    try:
+        if hasattr(obj, "crs"):
+            return CRS.from_user_input(obj.crs)
+        elif hasattr(obj, "get") and obj.get("crs"):
+            return CRS.from_user_input(obj["crs"])
+        else:
+            raise AttributeError(f"no crs attribute or key found in object: {obj}")
+    except Exception as exc:
+        logger.exception(exc)
+        raise NoCRSError(f"cannot determine CRS from object: {obj}") from exc
 
 
 def convert_vector(inp, out, overwrite=False, exists_ok=True, **kwargs):
@@ -531,7 +627,9 @@ def convert_vector(inp, out, overwrite=False, exists_ok=True, **kwargs):
     kwargs : mapping
         Creation parameters passed on to output file.
     """
-    if path_exists(out):
+    inp = MPath.from_inp(inp)
+    out = MPath.from_inp(out)
+    if out.exists():
         if not exists_ok:
             raise IOError(f"{out} already exists")
         elif not overwrite:
@@ -541,16 +639,75 @@ def convert_vector(inp, out, overwrite=False, exists_ok=True, **kwargs):
             fs_from_path(out).rm(out)
     kwargs = kwargs or {}
     if kwargs:
-        logger.debug("convert raster file %s to %s using %s", inp, out, kwargs)
-        with fiona.open(inp, "r") as src:
-            makedirs(os.path.dirname(out))
-            with fiona.open(out, mode="w", **{**src.meta, **kwargs}) as dst:
+        logger.debug("convert vector file %s to %s using %s", str(inp), out, kwargs)
+        with fiona_open(inp, "r") as src:
+            with fiona_open(out, mode="w", **{**src.meta, **kwargs}) as dst:
                 dst.writerecords(src)
     else:
-        logger.debug("copy %s to %s", inp, out)
+        logger.debug("copy %s to %s", str(inp), str(out))
+        out.parent.makedirs()
         copy(inp, out, overwrite=overwrite)
 
 
 def read_vector(inp, index="rtree"):
-    with fiona.open(inp, "r") as src:
+    with fiona_open(inp, "r") as src:
         return IndexedFeatures(src, index=index)
+
+
+class FionaRemoteMemoryWriter:
+    def __init__(self, path, *args, **kwargs):
+        logger.debug("open FionaRemoteMemoryWriter for path %s", path)
+        self.path = path
+        self._dst = MemoryFile()
+        self._open_args = args
+        self._open_kwargs = kwargs
+        self._sink = None
+
+    def __enter__(self):
+        self._sink = self._dst.open(*self._open_args, **self._open_kwargs)
+        return self._sink
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        try:
+            self._sink.close()
+            if exc_value is None:
+                logger.debug("upload fiona MemoryFile to %s", self.path)
+                with self.path.open("wb") as dst:
+                    dst.write(self._dst.getbuffer())
+        finally:
+            logger.debug("close fiona MemoryFile")
+            self._dst.close()
+
+
+class FionaRemoteTempFileWriter:
+    def __init__(self, path, *args, **kwargs):
+        logger.debug("open FionaRemoteTempFileWriter for path %s", path)
+        self.path = path
+        self._dst = NamedTemporaryFile(suffix=self.path.suffix)
+        self._open_args = args
+        self._open_kwargs = kwargs
+        self._sink = None
+
+    def __enter__(self):
+        self._sink = fiona.open(
+            self._dst.name, "w", *self._open_args, **self._open_kwargs
+        )
+        return self._sink
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        try:
+            self._sink.close()
+            if exc_value is None:
+                logger.debug("upload TempFile %s to %s", self._dst.name, self.path)
+                self.path.fs.put_file(self._dst.name, self.path)
+        finally:
+            logger.debug("close and remove tempfile")
+            self._dst.close()
+
+
+class FionaRemoteWriter:
+    def __new__(self, path, *args, in_memory=True, **kwargs):
+        if in_memory:
+            return FionaRemoteMemoryWriter(path, *args, **kwargs)
+        else:
+            return FionaRemoteTempFileWriter(path, *args, **kwargs)

@@ -1,8 +1,11 @@
 black
 coveralls
 flake8
+minio
+morecantile<5.0.0
 pre-commit
 pytest
 pytest-cov
 pytest-flask
+pytest-lazy-fixture
 rio-cogeo

@@ -1,7 +1,8 @@
 """Use a directory of zoom/row/column tiles as input."""
 
 import logging
-import os
+from functools import cached_property
+
 from shapely.geometry import box
 
 from mapchete.config import validate_values
@@ -9,14 +10,14 @@ from mapchete.errors import MapcheteConfigError
 from mapchete.formats import (
     base,
     data_type_from_extension,
+    driver_from_extension,
     driver_metadata,
     load_output_writer,
     read_output_metadata,
 )
-from mapchete.io import path_exists, absolute_path, tile_to_zoom_level
+from mapchete.io import MPath, tile_to_zoom_level
 from mapchete.io.vector import reproject_geometry
 from mapchete.tile import BufferedTilePyramid
-
 
 logger = logging.getLogger(__name__)
 METADATA = {
@@ -55,47 +56,57 @@ class InputData(base.InputData):
     def __init__(self, input_params, **kwargs):
         """Initialize."""
         super().__init__(input_params, **kwargs)
+        self._read_as_tiledir_func = None
+        logger.debug("InputData params: %s", input_params)
+        # populate internal parameters initially depending on whether this input was
+        # defined as simple or abstract input
+        self._params = input_params.get("abstract") or dict(path=input_params["path"])
+        # construct path and append optional filesystem options
+        self.path = MPath.from_inp(self._params).absolute_path(
+            input_params.get("conf_dir")
+        )
         if "abstract" in input_params:
-            self._params = input_params["abstract"]
-            self.path = absolute_path(
-                path=self._params["path"], base_dir=input_params["conf_dir"]
-            )
-            logger.debug("InputData params: %s", input_params)
-            # define pyramid
-            self.td_pyramid = BufferedTilePyramid(
-                self._params["grid"],
-                metatiling=self._params.get("metatiling", 1),
-                tile_size=self._params.get("tile_size", 256),
-                pixelbuffer=self._params.get("pixelbuffer", 0),
-            )
-            self._read_as_tiledir_func = base._read_as_tiledir
-            try:
-                self._tiledir_metadata_json = read_output_metadata(
-                    os.path.join(self.path, "metadata.json")
+            # define pyramid either by hardcoded given values or by existing metadata.json
+            if "grid" in self._params:
+                self.td_pyramid = BufferedTilePyramid(
+                    self._params["grid"],
+                    metatiling=self._params.get("metatiling", 1),
+                    tile_size=self._params.get("tile_size", 256),
+                    pixelbuffer=self._params.get("pixelbuffer", 0),
                 )
+            else:
                 try:
-                    self._data_type = self._tiledir_metadata_json["driver"]["data_type"]
-                except KeyError:
-                    self._data_type = driver_metadata(
-                        self._tiledir_metadata_json["driver"]["format"]
-                    )["data_type"]
-            except FileNotFoundError:
-                # in case no metadata.json is available, try to guess data type via the
-                # format file extension
+                    self.td_pyramid = self._tiledir_metadata_json["pyramid"]
+                except FileNotFoundError:
+                    raise MapcheteConfigError(
+                        f"Pyramid not defined and cannot find metadata.json in {self.path}"
+                    )
+            self._read_as_tiledir_func = base._read_as_tiledir
+            if "extension" in self._params:
                 self._data_type = data_type_from_extension(self._params["extension"])
+            else:
+                try:
+                    self._data_type = self._tiledir_metadata_json["driver"].get(
+                        "data_type",
+                        driver_metadata(
+                            self._tiledir_metadata_json["driver"]["format"]
+                        )["data_type"],
+                    )
+                except FileNotFoundError:
+                    # in case no metadata.json is available, try to guess data type via the
+                    # format file extension
+                    raise MapcheteConfigError(
+                        f"data type not defined and cannot find metadata.json in {self.path}"
+                    )
 
         elif "path" in input_params:
-            self.path = absolute_path(
-                path=input_params["path"], base_dir=input_params.get("conf_dir")
-            )
-            try:
-                self._tiledir_metadata_json = read_output_metadata(
-                    os.path.join(self.path, "metadata.json")
-                )
-            except FileNotFoundError:
-                raise MapcheteConfigError(f"Cannot find metadata.json in {self.path}")
             # define pyramid
             self.td_pyramid = self._tiledir_metadata_json["pyramid"]
+            self._data_type = driver_metadata(
+                self._tiledir_metadata_json["driver"]["format"]
+            )["data_type"]
+
+        try:
             self.output_data = load_output_writer(
                 dict(
                     self._tiledir_metadata_json["driver"],
@@ -107,23 +118,24 @@ class InputData(base.InputData):
                 ),
                 readonly=True,
             )
-            self._params = dict(
-                path=self.path,
-                grid=self.td_pyramid.grid.to_dict(),
-                metatiling=self.td_pyramid.metatiling,
-                pixelbuffer=self.td_pyramid.pixelbuffer,
-                tile_size=self.td_pyramid.tile_size,
+            self._read_as_tiledir_func = self.output_data._read_as_tiledir
+            self._params.update(
                 extension=self.output_data.file_extension.split(".")[-1],
                 **self._tiledir_metadata_json["driver"],
             )
-            self._read_as_tiledir_func = self.output_data._read_as_tiledir
-            self._data_type = driver_metadata(
-                self._tiledir_metadata_json["driver"]["format"]
-            )["data_type"]
-
+        except FileNotFoundError:
+            self.output_data = None
+            self._read_as_tiledir_func = self._read_as_tiledir_func
+        self._params.update(
+            grid=self.td_pyramid.grid.to_dict(),
+            metatiling=self.td_pyramid.metatiling,
+            pixelbuffer=self.td_pyramid.pixelbuffer,
+            tile_size=self.td_pyramid.tile_size,
+        )
         # validate parameters
         validate_values(
-            self._params, [("path", str), ("grid", (str, dict)), ("extension", str)]
+            self._params,
+            [("path", (str, MPath)), ("grid", (str, dict)), ("extension", str)],
         )
         self._ext = self._params["extension"]
 
@@ -132,7 +144,7 @@ class InputData(base.InputData):
         self._metadata = dict(
             self.METADATA,
             data_type=self._data_type,
-            file_extensions=[self._params["extension"]],
+            file_extensions=[self._ext],
         )
         if self._metadata.get("data_type") == "raster":
             self._params["count"] = self._params.get(
@@ -146,6 +158,13 @@ class InputData(base.InputData):
             }
         else:
             self._profile = None
+        self._min_zoom = self._params.get("min_zoom")
+        self._max_zoom = self._params.get("max_zoom")
+        self._resampling = self._params.get("resampling")
+
+    @cached_property
+    def _tiledir_metadata_json(self):
+        return read_output_metadata(self.path.joinpath("metadata.json"))
 
     def open(self, tile, **kwargs):
         """
@@ -168,6 +187,9 @@ class InputData(base.InputData):
             profile=self._profile,
             td_pyramid=self.td_pyramid,
             read_as_tiledir_func=self._read_as_tiledir_func,
+            min_zoom=self._min_zoom,
+            max_zoom=self._max_zoom,
+            resampling=self._resampling,
             **kwargs,
         )
 
@@ -199,17 +221,10 @@ def _get_tiles_paths(
     return [
         (_tile, _path)
         for _tile, _path in [
-            (
-                t,
-                "%s.%s"
-                % (
-                    os.path.join(*([basepath, str(t.zoom), str(t.row), str(t.col)])),
-                    ext,
-                ),
-            )
+            (t, basepath.joinpath(str(t.zoom), str(t.row), str(t.col)).with_suffix(ext))
             for t in pyramid.tiles_from_bounds(bounds, zoom)
         ]
-        if not exists_check or (exists_check and path_exists(_path))
+        if not exists_check or (exists_check and _path.exists())
     ]
 
 
@@ -238,6 +253,9 @@ class InputTile(base.InputTile):
         td_crs=None,
         td_pyramid=None,
         read_as_tiledir_func=None,
+        min_zoom=None,
+        max_zoom=None,
+        resampling=None,
     ):
         """Initialize."""
         self.tile = tile
@@ -247,11 +265,14 @@ class InputTile(base.InputTile):
         self._profile = profile
         self._td_pyramid = td_pyramid
         self._read_as_tiledir = read_as_tiledir_func
+        self._min_zoom = min_zoom
+        self._max_zoom = max_zoom
+        self._resampling = resampling
 
     def read(
         self,
         indexes=None,
-        resampling="nearest",
+        resampling=None,
         tile_directory_zoom=None,
         matching_method="gdal",
         matching_max_zoom=None,
@@ -304,6 +325,10 @@ class InputTile(base.InputTile):
         -------
         data : list for vector files or numpy array for raster files
         """
+        if resampling:
+            _resampling = resampling
+        else:
+            _resampling = self._resampling or "nearest"
         return self._read_as_tiledir(
             data_type=self._data_type,
             out_tile=self.tile,
@@ -313,12 +338,14 @@ class InputTile(base.InputTile):
                 fallback_to_higher_zoom=fallback_to_higher_zoom,
                 matching_method=matching_method,
                 matching_precision=matching_precision,
-                matching_max_zoom=matching_max_zoom,
+                matching_max_zoom=self._max_zoom
+                if matching_max_zoom is None
+                else matching_max_zoom,
             ),
             profile=self._profile,
             validity_check=validity_check,
             indexes=indexes,
-            resampling=resampling,
+            resampling=_resampling,
             dst_nodata=dst_nodata,
             gdal_opts=gdal_opts,
             **{k: v for k, v in kwargs.items() if k != "data_type"},
@@ -383,9 +410,19 @@ class InputTile(base.InputTile):
         matching_max_zoom=None,
     ):
         # determine tile bounds in TileDirectory CRS
-        td_bounds = reproject_geometry(
-            self.tile.bbox, src_crs=self.tile.tp.crs, dst_crs=self._td_pyramid.crs
-        ).bounds
+        # NOTE: because fiona/OGR cannot handle geometries crossing the antimeridian,
+        # we have to clip the source bounds to the CRS bounds.
+        _geom = reproject_geometry(
+            self.tile.bbox.intersection(box(*self.tile.buffered_tp.bounds)),
+            src_crs=self.tile.tp.crs,
+            dst_crs=self._td_pyramid.crs,
+        )
+        if _geom.is_empty:  # pragma: no cover
+            logger.debug(
+                "tile %s reprojected to %s is empty", self.tile, self._td_pyramid
+            )
+            return []
+        td_bounds = _geom.bounds
 
         # find target zoom level
         if tile_directory_zoom is None:
@@ -399,7 +436,6 @@ class InputTile(base.InputTile):
                 zoom = min([zoom, matching_max_zoom])
         else:
             zoom = tile_directory_zoom
-
         if fallback_to_higher_zoom:
             tiles_paths = []
             # check if tiles exist otherwise try higher zoom level
@@ -423,5 +459,4 @@ class InputTile(base.InputTile):
                 zoom=zoom,
             )
             logger.debug("%s potential tiles at zoom %s", len(tiles_paths), zoom)
-
         return tiles_paths

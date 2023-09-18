@@ -1,17 +1,15 @@
-import fiona
-import numpy as np
 import os
+
+import numpy as np
 import pytest
-import rasterio
 
 import mapchete
 from mapchete.index import zoom_index_gen
-from mapchete.io import get_boto3_bucket
+from mapchete.io import fiona_open, rasterio_open
 
 
 @pytest.mark.remote
 def test_remote_indexes(gtiff_s3):
-
     zoom = 7
     gtiff_s3.dict.update(zoom_levels=zoom)
 
@@ -29,22 +27,18 @@ def test_remote_indexes(gtiff_s3):
         )
 
         # assert GeoJSON exists
-        with fiona.open(
-            os.path.join(mp.config.output.path, "%s.geojson" % zoom)
-        ) as src:
+        path = mp.config.output.path / zoom + ".geojson"
+        with fiona_open(path) as src:
             assert len(src) == 2
 
         # assert TXT exists
-        txt_index = os.path.join(mp.config.output.path, "%s.txt" % zoom)
-        bucket = get_boto3_bucket(txt_index.split("/")[2])
-        key = "/".join(txt_index.split("/")[3:])
-        for obj in bucket.objects.filter(Prefix=key):
-            if obj.key == key:
-                content = obj.get()["Body"].read().decode()
-                assert len([l + "\n" for l in content.split("\n") if l]) == 2
+        txt_index = mp.config.output.path / zoom + ".txt"
+        with txt_index.open() as src:
+            assert len(list(src.readlines())) == 2
 
         # assert VRT exists
-        with rasterio.open(os.path.join(mp.config.output.path, "%s.vrt" % zoom)) as src:
+        path = mp.config.output.path / zoom + ".vrt"
+        with rasterio_open(path) as src:
             assert src.read().any()
 
     with mapchete.open(gtiff_s3.dict) as mp:
@@ -88,9 +82,9 @@ def test_vrt(mp_tmpdir, cleantopo_br):
         )
         # bounds = mp.config.effective_bounds
 
-    vrt_index = os.path.join(mp.config.output.path, "%s.vrt" % zoom)
+    vrt_index = mp.config.output.path / zoom + ".vrt"
 
-    with rasterio.open(vrt_index) as vrt:
+    with rasterio_open(vrt_index) as vrt:
         assert vrt.driver == "VRT"
         assert vrt.dtypes[0] == "uint16"
         assert vrt.meta["dtype"] == "uint16"
@@ -101,15 +95,12 @@ def test_vrt(mp_tmpdir, cleantopo_br):
         assert vrt_data.any()
 
     # generate a VRT using GDAL and compare
-    out_dir = os.path.join(mp_tmpdir, "cleantopo_br")
-    temp_vrt = os.path.join(out_dir, str(zoom) + "_gdal.vrt")
-    gdalbuildvrt = "gdalbuildvrt %s %s/%s/*/*.tif > /dev/null" % (
-        temp_vrt,
-        out_dir,
-        zoom,
-    )
-    os.system(gdalbuildvrt)
-    with rasterio.open(temp_vrt, "r") as gdal_vrt:
+    temp_vrt = mp.config.output.path / zoom + "_gdal.vrt"
+    gdalbuildvrt = f"gdalbuildvrt {str(temp_vrt)} {str(mp.config.output.path)}/{str(zoom)}/*/*.tif > /dev/null"
+    exitcode = os.system(gdalbuildvrt)
+    if exitcode != 0:
+        raise RuntimeError(f"command failed: {gdalbuildvrt}")
+    with rasterio_open(temp_vrt, "r") as gdal_vrt:
         assert gdal_vrt.dtypes[0] == "uint16"
         assert gdal_vrt.meta["dtype"] == "uint16"
         assert gdal_vrt.count == 1
@@ -136,7 +127,7 @@ def test_vrt(mp_tmpdir, cleantopo_br):
         )
 
 
-def test_vrt_mercator(mp_tmpdir, cleantopo_br_mercator):
+def test_vrt_mercator(cleantopo_br_mercator):
     zoom = 8
     with mapchete.open(
         dict(cleantopo_br_mercator.dict, zoom_levels=dict(min=0, max=zoom))
@@ -166,9 +157,9 @@ def test_vrt_mercator(mp_tmpdir, cleantopo_br_mercator):
         )
         # bounds = mp.config.effective_bounds
 
-    vrt_index = os.path.join(mp.config.output.path, "%s.vrt" % zoom)
+    vrt_index = mp.config.output.path / zoom + ".vrt"
 
-    with rasterio.open(vrt_index) as vrt:
+    with rasterio_open(vrt_index) as vrt:
         assert vrt.driver == "VRT"
         assert vrt.dtypes[0] == "uint16"
         assert vrt.meta["dtype"] == "uint16"
@@ -180,15 +171,12 @@ def test_vrt_mercator(mp_tmpdir, cleantopo_br_mercator):
         assert vrt_data.any()
 
     # generate a VRT using GDAL and compare
-    out_dir = os.path.join(mp_tmpdir, "cleantopo_br_mercator")
-    temp_vrt = os.path.join(out_dir, str(zoom) + "_gdal.vrt")
-    gdalbuildvrt = "gdalbuildvrt %s %s/%s/*/*.tif > /dev/null" % (
-        temp_vrt,
-        out_dir,
-        zoom,
-    )
-    os.system(gdalbuildvrt)
-    with rasterio.open(temp_vrt, "r") as gdal_vrt:
+    temp_vrt = mp.config.output.path / zoom + "_gdal.vrt"
+    gdalbuildvrt = f"gdalbuildvrt {str(temp_vrt)} {str(mp.config.output.path)}/{str(zoom)}/*/*.tif > /dev/null"
+    exitcode = os.system(gdalbuildvrt)
+    if exitcode != 0:
+        raise RuntimeError(f"command failed: {gdalbuildvrt}")
+    with rasterio_open(temp_vrt, "r") as gdal_vrt:
         assert gdal_vrt.dtypes[0] == "uint16"
         assert gdal_vrt.meta["dtype"] == "uint16"
         assert gdal_vrt.count == 1

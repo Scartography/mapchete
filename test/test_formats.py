@@ -1,6 +1,8 @@
 """Test Mapchete default formats."""
 
 import datetime
+import json
+
 import pytest
 from rasterio.crs import CRS
 from tilematrix import TilePyramid
@@ -11,14 +13,14 @@ from mapchete.formats import (
     available_input_formats,
     available_output_formats,
     base,
-    driver_from_file,
     driver_from_extension,
+    driver_from_file,
+    dump_metadata,
     load_input_reader,
+    load_metadata,
     load_output_reader,
     load_output_writer,
     read_output_metadata,
-    load_metadata,
-    dump_metadata,
 )
 from mapchete.tile import BufferedTilePyramid
 
@@ -77,6 +79,10 @@ def test_driver_from_file_geojson():
 
 def test_driver_from_file_shp():
     assert driver_from_file("some.shp") == "vector_file"
+
+
+def test_driver_from_file_mapchete():
+    assert driver_from_file("some.mapchete") == "Mapchete"
 
 
 def test_driver_from_file_errors(execute_kwargs_py):
@@ -243,3 +249,38 @@ def test_load_metadata_datetime_list(driver_output_params_dict):
     loaded = load_metadata(dump_metadata(driver_output_params_dict))
     for t in loaded["driver"]["time"]["steps"]:
         assert isinstance(t, datetime.date)
+
+
+def test_tile_path_schema(tile_path_schema):
+    mp = tile_path_schema.mp()
+    mp.batch_process()
+    tile = tile_path_schema.first_process_tile()
+    control = [str(tile.zoom), str(tile.col), str(tile.row) + ".tif"]
+    assert mp.config.output_reader.get_path(tile).elements[-3:] == control
+
+
+def test_tile_path_schema_metadata_json(tile_path_schema):
+    mp = tile_path_schema.mp()
+    mp.batch_process()
+    tile = tile_path_schema.first_process_tile()
+    output_metadata = read_output_metadata(
+        mp.config.output_reader.path / "metadata.json"
+    )
+    output_params = dict(
+        output_metadata["driver"],
+        path=mp.config.output_reader.path,
+        **output_metadata["pyramid"].to_dict()
+    )
+    output_reader = load_output_reader(output_params)
+    assert mp.config.output_reader.tile_path_schema == output_reader.tile_path_schema
+    assert mp.config.output_reader.get_path(tile) == output_reader.get_path(tile)
+
+
+def test_tile_path_schema_stac_json(tile_path_schema):
+    mp = tile_path_schema.mp()
+    mp.batch_process()
+    mp.write_stac()
+    stac_json = json.loads((mp.config.output_reader.path / "out.json").read_text())
+    template = stac_json.get("asset_templates")["bands"]["href"]
+    assert template.split("/")[-2] == "{TileCol}"
+    assert template.split("/")[-1] == "{TileRow}.tif"

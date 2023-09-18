@@ -5,30 +5,33 @@ When writing a new driver, please inherit from these classes and implement the
 respective interfaces.
 """
 
-from itertools import chain
 import logging
-import numpy as np
-import numpy.ma as ma
-import os
-from shapely.geometry import shape
 import types
 import warnings
+from itertools import chain
 
+import numpy as np
+import numpy.ma as ma
+from shapely.geometry import shape
+
+from mapchete._tasks import Task
 from mapchete.config import get_hash
-from mapchete.errors import MapcheteProcessOutputError, MapcheteNodataTile
+from mapchete.errors import MapcheteNodataTile, MapcheteProcessOutputError
 from mapchete.formats import write_output_metadata
-from mapchete.io import makedirs, path_exists, fs_from_path
+from mapchete.io import fs_from_path, makedirs, path_exists
 from mapchete.io.raster import (
     create_mosaic,
     extract_from_array,
     prepare_array,
     read_raster_window,
 )
-from mapchete._tasks import Task
 from mapchete.io.vector import read_vector_window
 from mapchete.tile import BufferedTilePyramid
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_TILE_PATH_SCHEMA = "{zoom}/{row}/{col}.{extension}"
 
 
 class InputData(object):
@@ -62,6 +65,9 @@ class InputData(object):
         self.preprocessing_tasks = {}
         # storage location of all preprocessing tasks
         self.preprocessing_tasks_results = {}
+        self.storage_options = input_params.get("abstract", {}).get(
+            "storage_options", {}
+        )
 
     def open(self, tile, **kwargs):
         """
@@ -106,7 +112,6 @@ class InputData(object):
 
     def cleanup(self):
         """Optional cleanup function called when Mapchete exits."""
-        pass
 
     def add_preprocessing_task(
         self, func, fargs=None, fkwargs=None, key=None, geometry=None, bounds=None
@@ -128,7 +133,8 @@ class InputData(object):
             raise KeyError(f"preprocessing task with key {key} already exists")
         logger.debug(f"add preprocessing task {key, func}")
         self.preprocessing_tasks[key] = Task(
-            id=key,
+            id=f"{key}",
+            result_key_name=f"preprocessing_task-{key}_result",
             func=func,
             fargs=fargs,
             fkwargs=fkwargs,
@@ -158,8 +164,10 @@ class InputData(object):
             task_key = f"{self.input_key}:{task_key}"
         if task_key not in self.preprocessing_tasks:  # pragma: no cover
             raise KeyError(f"task {task_key} is not a task for current input")
-        if task_key in self.preprocessing_tasks_results:  # pragma: no cover
-            raise KeyError(f"task {task_key} has already been set")
+        # The following part was commented out because on some rare occasions a
+        # mapchete Hub job would fail because of this.
+        # if task_key in self.preprocessing_tasks_results:  # pragma: no cover
+        #     raise KeyError(f"task {task_key} has already been set")
         self.preprocessing_tasks_results[task_key] = result
 
     def preprocessing_task_finished(self, task_key):
@@ -223,11 +231,9 @@ class InputTile(object):
 
     def __exit__(self, t, v, tb):
         """Clean up."""
-        pass
 
 
 class OutputDataBaseFunctions:
-
     write_in_parent_process = False
 
     def __init__(self, output_params, readonly=False, **kwargs):
@@ -245,17 +251,19 @@ class OutputDataBaseFunctions:
             pixelbuffer=output_params["pixelbuffer"],
         )
         self.crs = self.pyramid.crs
-        self._bucket = None
+        self.storage_options = output_params.get("storage_options")
         self.fs = self._fs = output_params.get(
             "fs", fs_from_path(output_params.get("path", ""))
         )
         self.fs_kwargs = self._fs_kwargs = output_params.get("fs_kwargs") or {}
+        self.tile_path_schema = output_params.get(
+            "tile_path_schema", DEFAULT_TILE_PATH_SCHEMA
+        )
 
     @property
     def stac_path(self):
         """Return path to STAC JSON file."""
-        default_basepath = os.path.dirname(self.path.rstrip("/") + "/")
-        return os.path.join(default_basepath, f"{self.stac_item_id}.json")
+        return self.path.joinpath(f"{self.stac_item_id}.json")
 
     @property
     def stac_item_id(self):
@@ -264,10 +272,7 @@ class OutputDataBaseFunctions:
 
         Defaults to path basename.
         """
-        default_basepath = os.path.dirname(self.path.rstrip("/") + "/")
-        return self.output_params.get("stac", {}).get("id") or os.path.basename(
-            default_basepath
-        )
+        return self.output_params.get("stac", {}).get("id") or self.path.stem
 
     @property
     def stac_item_metadata(self):
@@ -307,13 +312,11 @@ class OutputDataBaseFunctions:
         -------
         path : string
         """
-        return os.path.join(
-            *[
-                self.path,
-                str(tile.zoom),
-                str(tile.row),
-                str(tile.col) + self.file_extension,
-            ]
+        return self.path / self.tile_path_schema.format(
+            zoom=str(tile.zoom),
+            row=str(tile.row),
+            col=str(tile.col),
+            extension=self.file_extension.lstrip("."),
         )
 
     def extract_subset(self, input_data_tiles=None, out_tile=None):
@@ -450,7 +453,7 @@ class OutputDataWriter(OutputDataReader):
         tile : ``BufferedTile``
             must be member of output ``TilePyramid``
         """
-        makedirs(os.path.dirname(self.get_path(tile)))
+        self.get_path(tile).parent.makedirs()
 
     def output_is_valid(self, process_data):
         """
@@ -511,7 +514,6 @@ class OutputDataWriter(OutputDataReader):
 
     def close(self, exc_type=None, exc_value=None, exc_traceback=None):
         """Gets called if process is closed."""
-        pass
 
 
 class TileDirectoryOutputReader(OutputDataReader):

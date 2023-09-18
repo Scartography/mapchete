@@ -1,23 +1,16 @@
-import click
-import click_spinner
 import logging
-from multiprocessing import cpu_count, get_all_start_methods
 import os
-from rasterio.enums import Resampling
-import tilematrix
-import tqdm
+from multiprocessing import get_all_start_methods
 
-import mapchete
-from mapchete.config import (
-    raw_conf,
-    bounds_from_opts,
-    MULTIPROCESSING_DEFAULT_START_METHOD,
-)
+import click
+import tilematrix
+from rasterio.enums import Resampling
+
+from mapchete.config import MULTIPROCESSING_DEFAULT_START_METHOD
 from mapchete.formats import available_output_formats
-from mapchete.index import zoom_index_gen
+from mapchete.io import MPath
 from mapchete.log import set_log_level, setup_logfile
 from mapchete.validate import validate_bounds, validate_crs, validate_zooms
-
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +61,6 @@ def _setup_logfile(ctx, param, logfile):
 
 
 def _cb_key_val(ctx, param, value):
-
     """
     from: https://github.com/mapbox/rasterio/blob/69305c72b58b15a96330d371ad90ef31c209e981/rasterio/rio/options.py
 
@@ -117,11 +109,11 @@ def _cb_none_concurrency(ctx, param, value):
 
 # click arguments #
 ###################
-arg_mapchete_file = click.argument("mapchete_file", type=click.Path(exists=True))
+arg_mapchete_file = click.argument("mapchete_file", type=click.Path())
 arg_create_mapchete_file = click.argument("mapchete_file", type=click.Path())
 arg_mapchete_files = click.argument(
     "mapchete_files",
-    type=click.Path(exists=True),
+    type=click.Path(),
     nargs=-1,
     callback=_validate_mapchete_files,
 )
@@ -129,7 +121,7 @@ arg_process_file = click.argument("process_file", type=click.Path())
 arg_out_format = click.argument(
     "out_format", type=click.Choice(available_output_formats())
 )
-arg_input_raster = click.argument("input_raster", type=click.Path(exists=True))
+arg_input_raster = click.argument("input_raster", type=click.Path())
 arg_out_dir = click.argument("output_dir", type=click.Path())
 arg_input = click.argument("input_", metavar="INPUT", type=click.STRING)
 arg_output = click.argument("output", type=click.STRING)
@@ -143,7 +135,7 @@ arg_tiledir = click.argument("tiledir", type=click.STRING)
 opt_out_path = click.option(
     "--out-path",
     type=click.Path(),
-    default=os.path.join(os.getcwd(), "output"),
+    default=MPath.from_inp(os.getcwd()) / "output",
     help="Output path.",
 )
 opt_idx_out_dir = click.option(

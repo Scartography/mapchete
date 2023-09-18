@@ -1,6 +1,5 @@
 """Main module managing processes."""
 
-from cachetools import LRUCache
 import json
 import logging
 import multiprocessing
@@ -8,22 +7,24 @@ import os
 import threading
 import warnings
 
-from mapchete.config import MapcheteConfig, MULTIPROCESSING_DEFAULT_START_METHOD
-from mapchete.errors import MapcheteNodataTile, ReprojectionFailed
-from mapchete.formats import read_output_metadata
-from mapchete.io import fs_from_path, tiles_exist, read_json, makedirs
+from cachetools import LRUCache
+
 from mapchete._processing import (
-    compute,
-    _run_on_single_tile,
-    _run_area,
-    _preprocess,
     ProcessInfo,
+    _preprocess,
+    _run_area,
+    _run_on_single_tile,
+    compute,
     task_batches,
 )
-from mapchete.stac import update_tile_directory_stac_item
 from mapchete._tasks import TileTask
-from mapchete.tile import count_tiles
 from mapchete._timer import Timer
+from mapchete.config import MULTIPROCESSING_DEFAULT_START_METHOD, MapcheteConfig
+from mapchete.errors import MapcheteNodataTile, ReprojectionFailed
+from mapchete.formats import read_output_metadata
+from mapchete.io import MPath, fs_from_path, tiles_exist
+from mapchete.stac import tile_direcotry_item_to_dict, update_tile_directory_stac_item
+from mapchete.tile import count_tiles
 from mapchete.validate import validate_tile, validate_zooms
 
 logger = logging.getLogger(__name__)
@@ -62,9 +63,13 @@ def open(some_input, with_cache=False, fs=None, fs_kwargs=None, **kwargs):
     Mapchete
         a Mapchete process object
     """
-    if isinstance(some_input, str) and not some_input.endswith(".mapchete"):
+    # convert to MPath object if possible
+    if isinstance(some_input, str):
+        some_input = MPath.from_inp(some_input)
+    # for TileDirectory inputs
+    if isinstance(some_input, MPath) and some_input.suffix == "":
         logger.debug("assuming TileDirectory")
-        metadata_json = os.path.join(some_input, "metadata.json")
+        metadata_json = MPath.from_inp(some_input).joinpath("metadata.json")
         fs_kwargs = fs_kwargs or {}
         fs = fs or fs_from_path(metadata_json, **fs_kwargs)
         logger.debug("read metadata.json")
@@ -89,8 +94,19 @@ def open(some_input, with_cache=False, fs=None, fs_kwargs=None, **kwargs):
         )
         kwargs.update(mode="readonly")
         return Mapchete(MapcheteConfig(config, **kwargs))
-
-    return Mapchete(MapcheteConfig(some_input, **kwargs), with_cache=with_cache)
+    # for dicts, .mapchete file paths or MpacheteConfig objects
+    elif (
+        isinstance(some_input, dict)
+        or isinstance(some_input, MPath)
+        and some_input.suffix == ".mapchete"
+        or isinstance(some_input, MapcheteConfig)
+    ):
+        return Mapchete(MapcheteConfig(some_input, **kwargs), with_cache=with_cache)
+    else:  # pragma: no cover
+        raise TypeError(
+            "can only open input in form of a mapchete file path, a TileDirectory path, "
+            f"a dictionary or a MapcheteConfig object, not {type(some_input)}"
+        )
 
 
 class Mapchete(object):
@@ -129,7 +145,6 @@ class Mapchete(object):
         if not isinstance(config, MapcheteConfig):
             raise TypeError("config must be MapcheteConfig object")
         self.config = config
-        self.process_name = self.config.process_name
         self.with_cache = True if self.config.mode == "memory" else with_cache
         if self.with_cache:
             self.process_tile_cache = LRUCache(maxsize=512)
@@ -167,7 +182,7 @@ class Mapchete(object):
             ):
                 yield tile
         else:
-            for i in reversed(self.config.zoom_levels):
+            for i in self.config.zoom_levels.descending():
                 for tile in self.config.process_pyramid.tiles_from_geom(
                     self.config.area_at_zoom(i), zoom=i, batch_by=batch_by, exact=True
                 ):
@@ -423,7 +438,7 @@ class Mapchete(object):
         else:
             for future in _run_area(
                 process=self,
-                zoom_levels=list(_get_zoom_level(zoom, self)),
+                zoom_levels=_get_zoom_level(zoom, self),
                 dask_scheduler=dask_scheduler,
                 dask_max_submitted_tasks=dask_max_submitted_tasks,
                 dask_chunksize=dask_chunksize,
@@ -473,8 +488,8 @@ class Mapchete(object):
         -------
         number of tiles
         """
-        minzoom = min(self.config.init_zoom_levels) if minzoom is None else minzoom
-        maxzoom = max(self.config.init_zoom_levels) if maxzoom is None else maxzoom
+        minzoom = self.config.init_zoom_levels.min if minzoom is None else minzoom
+        maxzoom = self.config.init_zoom_levels.max if maxzoom is None else maxzoom
         if (minzoom, maxzoom) not in self._count_tiles_cache:
             logger.debug("counting tiles...")
             with Timer() as t:
@@ -673,29 +688,28 @@ class Mapchete(object):
             "memory",
         ]:
             return
-
         # read existing STAC file
         try:
-            with self.config.output.fs.open(self.config.output.stac_path, "r") as src:
+            with self.config.output.stac_path.open("r") as src:
                 item = pystac.read_dict(json.loads(src.read()))
         except FileNotFoundError:
             item = None
-
         try:
             item = update_tile_directory_stac_item(
                 item=item,
-                item_path=self.config.output.stac_path,
+                item_path=str(self.config.output.stac_path),
                 item_id=self.config.output.stac_item_id,
                 zoom_levels=self.config.init_zoom_levels,
                 bounds=self.config.effective_bounds,
                 item_metadata=self.config.output.stac_item_metadata,
                 tile_pyramid=self.config.output_pyramid,
                 bands_type=self.config.output.stac_asset_type,
+                band_asset_template=self.config.output.tile_path_schema,
             )
             logger.debug("write STAC item JSON to %s", self.config.output.stac_path)
-            makedirs(os.path.dirname(self.config.output.stac_path))
-            with self.config.output.fs.open(self.config.output.stac_path, "w") as dst:
-                dst.write(json.dumps(item.to_dict(), indent=indent))
+            self.config.output.stac_path.parent.makedirs()
+            with self.config.output.stac_path.open("w") as dst:
+                dst.write(json.dumps(tile_direcotry_item_to_dict(item), indent=indent))
         except ReprojectionFailed:
             logger.warning(
                 "cannot create STAC item because footprint cannot be reprojected into EPSG:4326"
@@ -769,6 +783,7 @@ class Mapchete(object):
                 ip.cleanup()
         # run output driver cleanup
         logger.debug(f"closing output driver {self.config.output}...")
+        # HINT: probably cleaner to use the outputs __exit__ function and use a contextmanager interface
         self.config.output.close(
             exc_type=exc_type, exc_value=exc_value, exc_traceback=exc_traceback
         )
@@ -779,11 +794,9 @@ class Mapchete(object):
             self.process_lock = None
 
     def __repr__(self):  # pragma: no cover
-        return f"Mapchete <process_name={self.process_name}>"
+        return f"Mapchete <process_name={self.config.process.name}>"
 
 
 def _get_zoom_level(zoom, process):
     """Determine zoom levels."""
-    return (
-        reversed(process.config.zoom_levels) if zoom is None else validate_zooms(zoom)
-    )
+    return process.config.zoom_levels if zoom is None else validate_zooms(zoom)

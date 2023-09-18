@@ -1,29 +1,32 @@
-"""Test Mapchete config module."""
-
-from copy import deepcopy
-import fiona
-from fiona.errors import DriverError
 import os
-import pytest
-import rasterio
-from shapely.errors import WKTReadingError
-from shapely.geometry import box, mapping, Polygon, shape
-from shapely import wkt
+import pickle
+from copy import deepcopy
+
 import oyaml as yaml
-from tilematrix._funcs import Bounds
+import pytest
+from fiona.errors import DriverError
+from pydantic import ValidationError
+from shapely import wkt
+from shapely.errors import WKTReadingError
+from shapely.geometry import Polygon, box, mapping, shape
+from shapely.ops import unary_union
 
 import mapchete
 from mapchete.config import (
-    bounds_from_opts,
     MapcheteConfig,
-    snap_bounds,
+    ProcessConfig,
+    ProcessFunc,
     _guess_geometry,
+    bounds_from_opts,
+    snap_bounds,
 )
-from mapchete.errors import MapcheteDriverError, MapcheteConfigError
+from mapchete.errors import MapcheteConfigError
+from mapchete.io import fiona_open, rasterio_open
+from mapchete.path import MPath
+from mapchete.types import Bounds
 
-
-SCRIPTDIR = os.path.dirname(os.path.realpath(__file__))
-TESTDATA_DIR = os.path.join(SCRIPTDIR, "testdata")
+SCRIPT_DIR = MPath(os.path.dirname(os.path.realpath(__file__)))
+TESTDATA_DIR = MPath(os.path.join(SCRIPT_DIR, "testdata/"))
 
 
 def test_config_errors(example_mapchete):
@@ -77,11 +80,11 @@ def test_config_zoom7(example_mapchete, dummy2_tif):
     zoom7 = config.params_at_zoom(7)
     input_files = zoom7["input"]
     assert input_files["file1"] is None
-    assert input_files["file2"].path == dummy2_tif
-    assert zoom7["some_integer_parameter"] == 12
-    assert zoom7["some_float_parameter"] == 5.3
-    assert zoom7["some_string_parameter"] == "string1"
-    assert zoom7["some_bool_parameter"] is True
+    assert str(input_files["file2"].path) == dummy2_tif
+    assert zoom7["process_parameters"]["some_integer_parameter"] == 12
+    assert zoom7["process_parameters"]["some_float_parameter"] == 5.3
+    assert zoom7["process_parameters"]["some_string_parameter"] == "string1"
+    assert zoom7["process_parameters"]["some_bool_parameter"] is True
 
 
 def test_config_zoom11(example_mapchete, dummy2_tif, dummy1_tif):
@@ -89,12 +92,12 @@ def test_config_zoom11(example_mapchete, dummy2_tif, dummy1_tif):
     config = MapcheteConfig(example_mapchete.dict)
     zoom11 = config.params_at_zoom(11)
     input_files = zoom11["input"]
-    assert input_files["file1"].path == dummy1_tif
-    assert input_files["file2"].path == dummy2_tif
-    assert zoom11["some_integer_parameter"] == 12
-    assert zoom11["some_float_parameter"] == 5.3
-    assert zoom11["some_string_parameter"] == "string2"
-    assert zoom11["some_bool_parameter"] is True
+    assert str(input_files["file1"].path) == dummy1_tif
+    assert str(input_files["file2"].path) == dummy2_tif
+    assert zoom11["process_parameters"]["some_integer_parameter"] == 12
+    assert zoom11["process_parameters"]["some_float_parameter"] == 5.3
+    assert zoom11["process_parameters"]["some_string_parameter"] == "string2"
+    assert zoom11["process_parameters"]["some_bool_parameter"] is True
 
 
 def test_read_zoom_level(zoom_mapchete):
@@ -126,7 +129,7 @@ def test_read_bounds(zoom_mapchete):
 
 def test_override_bounds(zoom_mapchete):
     """Override bounds when construcing configuration."""
-    config = MapcheteConfig(zoom_mapchete.dict, bounds=[3, 2, 3.5, 1.5])
+    config = MapcheteConfig(zoom_mapchete.dict, bounds=[3, 1.5, 3.5, 2])
     test_polygon = Polygon([[3, 1.5], [3, 2], [3.5, 2], [3.5, 1.5], [3, 1.5]])
     assert config.area_at_zoom(5).equals(test_polygon)
 
@@ -162,6 +165,36 @@ def test_effective_bounds(files_bounds, baselevels):
                 baselevels=dict(lower="cubic", max=7),
             )
         )
+
+
+@pytest.mark.parametrize(
+    "example_config",
+    [
+        pytest.lazy_fixture("custom_grid"),
+        pytest.lazy_fixture("file_groups"),
+        pytest.lazy_fixture("overviews"),
+        pytest.lazy_fixture("baselevels"),
+        pytest.lazy_fixture("baselevels_output_buffer"),
+        pytest.lazy_fixture("baselevels_custom_nodata"),
+        pytest.lazy_fixture("mapchete_input"),
+        pytest.lazy_fixture("dem_to_hillshade"),
+        pytest.lazy_fixture("env_storage_options_mapchete"),
+        pytest.lazy_fixture("zoom_mapchete"),
+        pytest.lazy_fixture("cleantopo_br_mercator"),
+    ],
+)
+def test_effective_area(example_config):
+    config = MapcheteConfig(example_config.dict)
+    aoi = config.area.intersection(config.init_area)
+    control_area = unary_union(
+        [
+            tile.bbox
+            for tile in config.process_pyramid.tiles_from_geom(
+                aoi, config.zoom_levels.min
+            )
+        ]
+    )
+    assert config.effective_area.difference(control_area).area == 0
 
 
 def test_area_and_bounds(cleantopo_br_tiledir, sample_geojson):
@@ -276,10 +309,10 @@ def test_aoi(aoi_br, aoi_br_geojson, cleantopo_br_tif):
     zoom = 7
 
     # read geojson geometry
-    with fiona.open(aoi_br_geojson) as src:
+    with fiona_open(aoi_br_geojson) as src:
         area = shape(next(iter(src))["geometry"])
     # read input tiff bounds
-    with rasterio.open(cleantopo_br_tif) as src:
+    with rasterio_open(cleantopo_br_tif) as src:
         raster = box(*src.bounds)
     aoi = area.intersection(raster)
 
@@ -311,7 +344,7 @@ def test_aoi(aoi_br, aoi_br_geojson, cleantopo_br_tif):
 
 
 def test_guess_geometry(aoi_br_geojson):
-    with fiona.open(aoi_br_geojson) as src:
+    with fiona_open(aoi_br_geojson) as src:
         area = shape(next(iter(src))["geometry"])
 
     # WKT
@@ -448,4 +481,79 @@ def test_init_overrides_config(example_mapchete):
 
 def test_custom_process(example_custom_process_mapchete):
     with mapchete.open(example_custom_process_mapchete.dict) as mp:
-        assert callable(mp.config.process_func)
+        assert (
+            mp.execute(example_custom_process_mapchete.first_process_tile()) is not None
+        )
+
+
+# pytest-env must be installed
+def test_env_params(env_storage_options_mapchete):
+    with mapchete.open(env_storage_options_mapchete.dict) as mp:
+        inp = mp.config.params_at_zoom(5)
+        assert inp["input"]["file1"].storage_options.get("access_key") == "foo"
+        assert mp.config.output.storage_options.get("access_key") == "bar"
+
+
+def test_process_config_pyramid_settings():
+    conf = ProcessConfig(
+        pyramid=dict(
+            grid="geodetic",
+        ),
+        zoom_levels=5,
+        output={},
+    )
+    assert conf.pyramid.pixelbuffer == 0
+    assert conf.pyramid.metatiling == 1
+
+    conf = ProcessConfig(
+        pyramid=dict(grid="geodetic", pixelbuffer=5, metatiling=4),
+        zoom_levels=5,
+        output={},
+    )
+    assert conf.pyramid.pixelbuffer == 5
+    assert conf.pyramid.metatiling == 4
+
+    with pytest.raises(ValidationError):
+        ProcessConfig(
+            pyramid=dict(grid="geodetic", pixelbuffer=-1, metatiling=4),
+            zoom_levels=5,
+            output={},
+        )
+
+    with pytest.raises(ValidationError):
+        ProcessConfig(
+            pyramid=dict(grid="geodetic", pixelbuffer=5, metatiling=5),
+            zoom_levels=5,
+            output={},
+        )
+
+
+@pytest.mark.parametrize(
+    "process_src",
+    [
+        "mapchete.processes.examples.example_process",
+        SCRIPT_DIR / "example_process.py",
+        (SCRIPT_DIR / "example_process.py").read_text().split("\n"),
+    ],
+)
+def test_process(process_src, example_custom_process_mapchete):
+    mp = example_custom_process_mapchete.process_mp()
+    process = ProcessFunc(process_src)
+    assert process.name
+    assert process(mp) is not None
+
+
+@pytest.mark.parametrize(
+    "process_src",
+    [
+        "mapchete.processes.examples.example_process",
+        SCRIPT_DIR / "example_process.py",
+        (SCRIPT_DIR / "example_process.py").read_text().split("\n"),
+    ],
+)
+def test_process_pickle(process_src, example_custom_process_mapchete):
+    mp = example_custom_process_mapchete.process_mp()
+    process = ProcessFunc(process_src)
+    # pickle and unpickle
+    reloaded = pickle.loads(pickle.dumps(process))
+    assert reloaded(mp) is not None

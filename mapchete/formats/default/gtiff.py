@@ -30,14 +30,14 @@ compress: string
     CCITTFAX3, CCITTFAX4, lzma
 """
 
-from contextlib import ExitStack
 import logging
 import math
 import os
 import warnings
+from contextlib import ExitStack
 
-from affine import Affine
 import numpy as np
+from affine import Affine
 from numpy import ma
 from rasterio.enums import Resampling
 from rasterio.profiles import Profile
@@ -46,43 +46,26 @@ from rasterio.windows import from_bounds
 from shapely.geometry import box
 from tilematrix import Bounds
 
-from mapchete.config import validate_values, snap_bounds, _OUTPUT_PARAMETERS
+from mapchete.config import _OUTPUT_PARAMETERS, snap_bounds, validate_values
 from mapchete.errors import MapcheteConfigError
 from mapchete.formats import base
-from mapchete.io import makedirs, path_exists, path_is_remote
+from mapchete.io import MPath, path_exists, path_is_remote
+from mapchete.io.profiles import DEFAULT_PROFILES
 from mapchete.io.raster import (
-    write_raster_window,
-    prepare_array,
-    memory_file,
-    read_raster_no_crs,
     extract_from_array,
+    memory_file,
+    prepare_array,
     rasterio_write,
+    read_raster_no_crs,
+    write_raster_window,
 )
 from mapchete.tile import BufferedTile
 from mapchete.validate import deprecated_kwargs
 
-
 logger = logging.getLogger(__name__)
 
 
-class DefaultGTiffProfile(Profile):
-    """Tiled, band-interleaved, DEFLATE-compressed, 8-bit GTiff."""
-
-    defaults = {
-        "driver": "GTiff",
-        "blockysize": 512,
-        "blockxsize": 512,
-        "tiled": True,
-        "dtype": "uint8",
-        "compress": "deflate",
-        "predictor": 2,
-        "interleave": "band",
-        "nodata": 0,
-    }
-
-
 METADATA = {"driver_name": "GTiff", "data_type": "raster", "mode": "rw"}
-GTIFF_DEFAULT_PROFILE = DefaultGTiffProfile()
 IN_MEMORY_THRESHOLD = int(os.environ.get("MP_IN_MEMORY_THRESHOLD", 20000 * 20000))
 
 
@@ -154,7 +137,7 @@ class OutputDataWriter:
         """Initialize."""
         self.path = output_params["path"]
         self.file_extension = ".tif"
-        if self.path.endswith(self.file_extension):
+        if self.path.suffix == self.file_extension:
             return GTiffSingleFileOutputWriter(output_params, **kwargs)
         else:
             return GTiffTileDirectoryOutputWriter(output_params, **kwargs)
@@ -240,14 +223,16 @@ class GTiffOutputReaderFunctions:
         -------
         is_valid : bool
         """
-        return validate_values(config, [("bands", int), ("path", str), ("dtype", str)])
+        return validate_values(
+            config, [("bands", int), ("path", (str, MPath)), ("dtype", str)]
+        )
 
     def _set_attributes(self, output_params):
         self.path = output_params["path"]
         self.file_extension = ".tif"
         self.output_params = dict(
             output_params,
-            nodata=output_params.get("nodata", GTIFF_DEFAULT_PROFILE["nodata"]),
+            nodata=output_params.get("nodata", DEFAULT_PROFILES["COG"]()["nodata"]),
         )
 
 
@@ -318,7 +303,7 @@ class GTiffTileDirectoryOutputReader(
             output profile dictionary used for rasterio.
         """
         dst_metadata = dict(
-            GTIFF_DEFAULT_PROFILE,
+            DEFAULT_PROFILES["COG"](),
             count=self.output_params["bands"],
             **{
                 k: v
@@ -401,7 +386,6 @@ class GTiffTileDirectoryOutputWriter(
 class GTiffSingleFileOutputWriter(
     GTiffOutputReaderFunctions, base.SingleFileOutputWriter
 ):
-
     write_in_parent_process = True
 
     def __init__(self, output_params, **kwargs):
@@ -446,8 +430,7 @@ class GTiffSingleFileOutputWriter(
         creation_options = {
             k: v for k, v in self.output_params.items() if k not in _OUTPUT_PARAMETERS
         }
-        self._profile = dict(
-            DefaultGTiffProfile(driver="COG" if self.cog else "GTiff"),
+        self._profile = DEFAULT_PROFILES["COG" if self.cog else "GTiff"](
             transform=Affine(
                 self.pyramid.pixel_x_size(self.zoom),
                 0,
@@ -462,10 +445,19 @@ class GTiffSingleFileOutputWriter(
             crs=self.pyramid.crs,
             **creation_options,
         )
-        logger.debug("single GTiff profile: %s", self._profile)
+        if self.cog:
+            if self._profile.get("blocksize") is not None:
+                self._profile["blocksize"] = int(self._profile.get("blocksize"))
+        else:
+            for blocksize in ["blockxsize", "blockysize"]:
+                if self._profile.get(blocksize) is not None:
+                    self._profile[blocksize] = int(self._profile[blocksize])
+        logger.debug("single GTiff profile: %s", str(self._profile))
         logger.debug(
             get_maximum_overview_level(
-                width, height, minsize=self._profile["blockxsize"]
+                width,
+                height,
+                minsize=self._profile.get("blocksize", self._profile.get("blockxsize")),
             )
         )
         if self.cog or "overviews" in self.output_params:
@@ -480,7 +472,11 @@ class GTiffSingleFileOutputWriter(
                     for i in range(
                         1,
                         get_maximum_overview_level(
-                            width, height, minsize=self._profile["blockxsize"]
+                            width,
+                            height,
+                            minsize=self._profile.get(
+                                "blocksize", self._profile.get("blockxsize")
+                            ),
                         ),
                     )
                 ],
@@ -504,7 +500,6 @@ class GTiffSingleFileOutputWriter(
                 logger.debug("remove existing file: %s", self.path)
                 os.remove(self.path)
         # create output directory if necessary
-        makedirs(os.path.dirname(self.path))
         logger.debug("open output file: %s", self.path)
         self._ctx = ExitStack()
         self.dst = self._ctx.enter_context(
@@ -643,7 +638,7 @@ class GTiffSingleFileOutputWriter(
                         ].name.upper()
                     )
         finally:
-            self._ctx.close()
+            self._ctx.__exit__(exc_type, exc_value, exc_traceback)
 
 
 def _window_in_out_file(window, rio_file):
@@ -731,4 +726,3 @@ class InputTile(base.InputTile):
 
     def __exit__(self, t, v, tb):
         """Clear cache on close."""
-        pass

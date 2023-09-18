@@ -1,27 +1,26 @@
-import fiona
-import logging
 import json
-from multiprocessing import cpu_count
+import logging
 import os
+import warnings
+from multiprocessing import cpu_count
 from pprint import pformat
-import rasterio
+from typing import Callable, List, Tuple, Union
+
+import tilematrix
 from rasterio.crs import CRS
 from rasterio.vrt import WarpedVRT
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
-import tilematrix
-from typing import Callable, List, Tuple, Union
-import warnings
 
 import mapchete
 from mapchete.commands._execute import execute
 from mapchete.config import raw_conf, raw_conf_output_pyramid
 from mapchete.formats import (
-    driver_from_file,
-    available_output_formats,
     available_input_formats,
+    available_output_formats,
+    driver_from_file,
 )
-from mapchete.io import read_json, get_best_zoom_level, fs_from_path
+from mapchete.io import MPath, fiona_open, get_best_zoom_level, rasterio_open, read_json
 from mapchete.io.vector import reproject_geometry
 from mapchete.tile import BufferedTilePyramid
 from mapchete.validate import validate_zooms
@@ -31,8 +30,8 @@ OUTPUT_FORMATS = available_output_formats()
 
 
 def convert(
-    tiledir: Union[str, dict],
-    output: str,
+    tiledir: Union[str, dict, MPath],
+    output: Union[str, MPath],
     zoom: Union[int, List[int]] = None,
     area: Union[BaseGeometry, str, dict] = None,
     area_crs: Union[CRS, str] = None,
@@ -66,6 +65,8 @@ def convert(
     cog: bool = False,
     msg_callback: Callable = None,
     as_iterator: bool = False,
+    src_fs_opts: Union[dict, None] = None,
+    dst_fs_opts: Union[dict, None] = None,
 ) -> mapchete.Job:
     """
     Convert mapchete outputs or other geodata.
@@ -177,6 +178,8 @@ def convert(
     workers = workers or multi or cpu_count()
     creation_options = creation_options or {}
     bidx = [bidx] if isinstance(bidx, int) else bidx
+    tiledir = MPath.from_inp(tiledir, storage_options=src_fs_opts)
+    output = MPath.from_inp(output, storage_options=dst_fs_opts)
     try:
         input_info = _get_input_info(tiledir)
         logger.debug("input params: %s", input_info)
@@ -186,11 +189,10 @@ def convert(
         raise ValueError(e)
 
     if (
-        isinstance(output_pyramid, str)
+        isinstance(output_pyramid, (str, MPath))
         and output_pyramid not in tilematrix._conf.PYRAMID_PARAMS.keys()
     ):
-        with fs_from_path(output_pyramid).open(output_pyramid) as src:
-            output_pyramid = json.loads(src.read())
+        output_pyramid = json.loads(MPath.from_inp(output_pyramid).read_text())
 
     # collect mapchete configuration
     mapchete_config = dict(
@@ -236,10 +238,12 @@ def convert(
         ),
         config_dir=os.getcwd(),
         zoom_levels=zoom or input_info["zoom_levels"],
-        scale_ratio=scale_ratio,
-        scale_offset=scale_offset,
-        resampling=resampling_method,
-        band_indexes=bidx,
+        process_parameters=dict(
+            scale_ratio=scale_ratio,
+            scale_offset=scale_offset,
+            resampling=resampling_method,
+            band_indexes=bidx,
+        ),
     )
 
     # assert all required information is there
@@ -302,6 +306,8 @@ def convert(
     mapchete_config.update(
         bounds=(clip_intersection.bounds if clip_geometry else inp_bounds),
         bounds_crs=bounds_crs,
+    )
+    mapchete_config["process_parameters"].update(
         clip_to_output_dtype=mapchete_config["output"].get("dtype", None),
     )
     logger.debug(f"temporary config generated: {pformat(mapchete_config)}")
@@ -329,14 +335,13 @@ def convert(
 
 
 def _clip_bbox(clip_geometry, dst_crs=None):
-    with fiona.open(clip_geometry) as src:
+    with fiona_open(clip_geometry) as src:
         return reproject_geometry(box(*src.bounds), src_crs=src.crs, dst_crs=dst_crs)
 
 
 def _get_input_info(inp):
-
     # assuming single file if path has a file extension
-    if os.path.splitext(inp)[1]:
+    if inp.suffix:
         logger.debug("assuming single file")
         driver = driver_from_file(inp)
 
@@ -380,7 +385,7 @@ def _input_mapchete_info(inp):
 
 
 def _input_rasterio_info(inp):
-    with rasterio.open(inp) as src:
+    with rasterio_open(inp) as src:
         if src.transform.is_identity:
             if src.gcps[1] is not None:
                 with WarpedVRT(src) as dst:
@@ -411,7 +416,7 @@ def _input_rasterio_info(inp):
 
 
 def _input_fiona_info(inp):
-    with fiona.open(inp) as src:
+    with fiona_open(inp) as src:
         return dict(
             output_params=dict(
                 schema=src.schema,
@@ -425,8 +430,8 @@ def _input_fiona_info(inp):
         )
 
 
-def _input_tile_directory_info(inp):
-    conf = read_json(os.path.join(inp, "metadata.json"))
+def _input_tile_directory_info(tiledir_path):
+    conf = read_json(tiledir_path / "metadata.json")
     pyramid = BufferedTilePyramid.from_dict(conf["pyramid"])
     return dict(
         output_params=conf["driver"],
@@ -440,10 +445,9 @@ def _input_tile_directory_info(inp):
 
 
 def _get_output_info(output):
-    _, file_ext = os.path.splitext(output)
-    if not file_ext:
+    if not output.suffix:
         return dict(type="TileDirectory", driver=None)
-    elif file_ext == ".tif":
+    elif output.suffix == ".tif":
         return dict(type="SingleFile", driver="GTiff")
     else:
-        raise TypeError(f"Could not determine output from extension: {file_ext}")
+        raise TypeError(f"Could not determine output from extension: {output.suffix}")
