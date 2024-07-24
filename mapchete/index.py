@@ -30,7 +30,7 @@ import fiona
 from rasterio.dtypes import _gdal_typename
 from shapely.geometry import mapping
 
-from mapchete.config import get_zoom_levels
+from mapchete.config.parse import get_zoom_levels
 from mapchete.io import (
     MPath,
     fiona_open,
@@ -59,46 +59,20 @@ def zoom_index_gen(
     geojson=False,
     gpkg=False,
     shapefile=False,
+    flatgeobuf=False,
     txt=False,
     vrt=False,
     fieldname="location",
     basepath=None,
     for_gdal=True,
-    threading=False,
-    **kwargs,
 ):
     """
     Generate indexes for given zoom level.
-
-    Parameters
-    ----------
-    mp : Mapchete object
-        process output to be indexed
-    out_dir : path
-        optionally override process output directory
-    zoom : int
-        zoom level to be processed
-    geojson : bool
-        generate GeoJSON index (default: False)
-    gpkg : bool
-        generate GeoPackage index (default: False)
-    shapefile : bool
-        generate Shapefile index (default: False)
-    txt : bool
-        generate tile path list textfile (default: False)
-    vrt : bool
-        GDAL-style VRT file (default: False)
-    fieldname : str
-        field name which contains paths of tiles (default: "location")
-    basepath : str
-        if set, use custom base path instead of output path
-    for_gdal : bool
-        use GDAL compatible remote paths, i.e. add "/vsicurl/" before path
-        (default: True)
     """
     if tile and zoom:  # pragma: no cover
         raise ValueError("tile and zoom cannot be used at the same time")
-    zoom = tile[0] if tile else zoom
+
+    zoom = tile.zoom if tile else zoom
     for zoom in get_zoom_levels(process_zoom_levels=zoom):
         with ExitStack() as es:
             # get index writers for all enabled formats
@@ -131,6 +105,17 @@ def zoom_index_gen(
                         VectorFileWriter(
                             driver="ESRI Shapefile",
                             out_path=_index_file_path(out_dir, zoom, "shp"),
+                            crs=mp.config.output_pyramid.crs,
+                            fieldname=fieldname,
+                        )
+                    )
+                )
+            if flatgeobuf:
+                index_writers.append(
+                    es.enter_context(
+                        VectorFileWriter(
+                            driver="FlatGeobuf",
+                            out_path=_index_file_path(out_dir, zoom, "fgb"),
                             crs=mp.config.output_pyramid.crs,
                             fieldname=fieldname,
                         )
@@ -356,7 +341,6 @@ class VRTFileWriter:
 
     def __init__(self, out_path=None, output=None, out_pyramid=None):
         # see if lxml is installed before checking all output tiles
-        from lxml.builder import ElementMaker
 
         self.path = out_path
         self._tp = out_pyramid
@@ -470,18 +454,16 @@ class VRTFileWriter:
                                 xOff=str(
                                     list(
                                         raster.bounds_to_ranges(
-                                            out_bounds=tile.bounds,
-                                            in_affine=vrt_affine,
-                                            in_shape=vrt_shape,
+                                            bounds=tile.bounds,
+                                            transform=vrt_affine,
                                         )
                                     )[2]
                                 ),
                                 yOff=str(
                                     list(
                                         raster.bounds_to_ranges(
-                                            out_bounds=tile.bounds,
-                                            in_affine=vrt_affine,
-                                            in_shape=vrt_shape,
+                                            bounds=tile.bounds,
+                                            transform=vrt_affine,
                                         )
                                     )[0]
                                 ),

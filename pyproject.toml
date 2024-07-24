@@ -12,13 +12,12 @@ authors = [
     { name = "Joachim Ungar", email = "joachim.ungar@gmail.com" },
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: GIS",
 ]
 dependencies = [
@@ -26,13 +25,17 @@ dependencies = [
     "click-plugins",
     "click-spinner",
     "click>=7.1.1",
+    "dask",
+    "distributed",
     "fiona>=1.8.13.post1",
     "fsspec",
     "importlib-metadata",
     "importlib-resources",
     "numpy>=1.16",
     "oyaml",
-    "pydantic<2.0.0",
+    "pydantic>=2.3.0",
+    "pydantic-geojson",
+    "pydantic_settings>=2.0.0",
     "pyproj",
     "python-dateutil",
     "rasterio>1.2.10",
@@ -45,48 +48,43 @@ dependencies = [
 [project.optional-dependencies]
 complete = [
     "aiohttp",
-    "aiobotocore>=1.1.2,<=2.5.4",
+    "aiobotocore>=1.1.2",
     "boto3>=1.14.44",
     "dask",
     "distributed",
-    "Flask",
+    "Flask<3.0.0",
     "Flask-RangeRequest",
-    "fsspec[http]",
-    "fsspec[s3]",
-    "geobuf",
+    "fsspec[http,s3]>=2023.12.0",
     "lxml",
     "matplotlib",
-    "protobuf<=3.20.1",
-    "pystac[urllib3]<=1.7.3",
+    "memray",
+    "pystac[urllib3]>=1.8.2",
     "requests",
     "rtree",
-    "s3fs<2023.9.0",
+    "s3fs!=2023.9.0",
+    "tilebench",
     "werkzeug>=0.15",
 ]
 contours = [
     "matplotlib",
-]
-dask = [
-    "dask",
-    "distributed",
-]
-geobuf = [
-    "geobuf",
-    "protobuf<=3.20.1",
 ]
 http = [
     "aiohttp",
     "fsspec[http]",
     "requests",
 ]
+profiling = [
+    "memray",
+    "tilebench"
+]
 s3 = [
     "aiobotocore>=1.1.2",
     "boto3>=1.14.44",
     "fsspec[s3]",
-    "s3fs<2023.9.0",
+    "s3fs!=2023.9.0",
 ]
 serve = [
-    "Flask",
+    "Flask<3.0.0",
     "Flask-RangeRequest",
     "werkzeug>=0.15",
 ]
@@ -103,6 +101,7 @@ vrt = [
 
 [project.scripts]
 mapchete = "mapchete.cli.main:main"
+mpath = "mapchete.cli.mpath:mpath"
 
 [project.entry-points."mapchete.cli.commands"]
 convert = "mapchete.cli.default.convert:convert"
@@ -118,7 +117,6 @@ stac = "mapchete.cli.default.stac:stac"
 
 [project.entry-points."mapchete.formats.drivers"]
 flatgeobuf = "mapchete.formats.default.flatgeobuf"
-geobuf = "mapchete.formats.default.geobuf"
 geojson = "mapchete.formats.default.geojson"
 gtiff = "mapchete.formats.default.gtiff"
 mapchete_input = "mapchete.formats.default.mapchete_input"

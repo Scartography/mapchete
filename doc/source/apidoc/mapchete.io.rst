@@ -1,14 +1,21 @@
 mapchete.io package
 ===================
 
+Subpackages
+-----------
+
+.. toctree::
+   :maxdepth: 4
+
+   mapchete.io.raster
+
 Submodules
 ----------
 
 .. toctree::
    :maxdepth: 4
 
-   mapchete.io.raster
-   mapchete.io.settings
+   mapchete.io.profiles
    mapchete.io.vector
 
 Module contents

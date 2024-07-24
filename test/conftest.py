@@ -9,15 +9,24 @@ import pytest
 from aiohttp.client_exceptions import ClientConnectorError
 from minio import Minio
 from shapely import wkt
-from shapely.geometry import box
+from shapely.geometry import (
+    GeometryCollection,
+    LineString,
+    MultiLineString,
+    MultiPoint,
+    MultiPolygon,
+    Point,
+    Polygon,
+    box,
+)
 from tilematrix import Bounds, GridDefinition
 
-from mapchete._executor import (
+from mapchete.cli.default.serve import create_app
+from mapchete.executor import (
     ConcurrentFuturesExecutor,
     DaskExecutor,
     SequentialExecutor,
 )
-from mapchete.cli.default.serve import create_app
 from mapchete.io import MPath, copy, rasterio_open
 from mapchete.io.vector import reproject_geometry
 from mapchete.testing import ProcessFixture
@@ -31,7 +40,8 @@ S3_SECRET = "Eashei2a"
 S3_ENDPOINT_URL = "localhost:9000"
 
 SCRIPT_DIR = MPath(os.path.dirname(os.path.realpath(__file__)))
-TESTDATA_DIR = MPath(os.path.join(SCRIPT_DIR, "testdata/"))
+EXAMPLES_DIR = SCRIPT_DIR.parent / "examples/"
+TESTDATA_DIR = SCRIPT_DIR / "testdata/"
 HTTP_TESTDATA_DIR = MPath("http://localhost/open/")
 SECURE_HTTP_TESTDATA_DIR = MPath(
     "http://localhost/secure/",
@@ -124,14 +134,13 @@ def minio_testdata_bucket():
 
 # flask test app for mapchete serve
 @pytest.fixture
-def app(dem_to_hillshade, cleantopo_br, geobuf, geojson, mp_tmpdir):
+def app(dem_to_hillshade, cleantopo_br, geojson):
     """Dummy Flask app."""
     return create_app(
         mapchete_files=[
             dem_to_hillshade.path,
             cleantopo_br.path,
             geojson.path,
-            geobuf.path,
         ],
         zoom=None,
         bounds=None,
@@ -178,6 +187,12 @@ def wkt_geom_tl():
 
 
 # example files
+@pytest.fixture
+def local_raster(testdata_dir):
+    """Fixture for HTTP raster."""
+    return testdata_dir / "cleantopo/1/0/0.tif"
+
+
 @pytest.fixture
 def http_raster(http_testdata_dir):
     """Fixture for HTTP raster."""
@@ -490,12 +505,12 @@ def sample_geojson():
     return TESTDATA_DIR / "sample.geojson"
 
 
-@pytest.fixture
-def geometrycollection():
-    """Fixture for geometrycollection.geojson"""
-    return wkt.loads(
-        "GEOMETRYCOLLECTION (LINESTRING (-100.9423828125 78.75, -100.8984375 78.75), LINESTRING (-100.2392578125 78.75, -99.9755859375 78.75), POLYGON ((-101.25 78.9697265625, -101.25 79.013671875, -101.2060546875 79.013671875, -101.2060546875 78.9697265625, -100.986328125 78.9697265625, -100.986328125 78.92578125, -101.0302734375 78.92578125, -101.0302734375 78.8818359375, -101.07421875 78.8818359375, -101.1181640625 78.8818359375, -101.1181640625 78.837890625, -101.162109375 78.837890625, -101.2060546875 78.837890625, -101.2060546875 78.7939453125, -100.9423828125 78.7939453125, -100.9423828125 78.75, -101.25 78.75, -101.25 78.9697265625)), POLYGON ((-100.8984375 78.75, -100.8984375 78.7939453125, -100.5908203125 78.7939453125, -100.546875 78.7939453125, -100.546875 78.837890625, -100.3271484375 78.837890625, -100.3271484375 78.7939453125, -100.2392578125 78.7939453125, -100.2392578125 78.75, -100.8984375 78.75)))"
-    )
+# @pytest.fixture
+# def geometrycollection():
+#     """Fixture for geometrycollection.geojson"""
+#     return wkt.loads(
+#         "GEOMETRYCOLLECTION (LINESTRING (-100.9423828125 78.75, -100.8984375 78.75), LINESTRING (-100.2392578125 78.75, -99.9755859375 78.75), POLYGON ((-101.25 78.9697265625, -101.25 79.013671875, -101.2060546875 79.013671875, -101.2060546875 78.9697265625, -100.986328125 78.9697265625, -100.986328125 78.92578125, -101.0302734375 78.92578125, -101.0302734375 78.8818359375, -101.07421875 78.8818359375, -101.1181640625 78.8818359375, -101.1181640625 78.837890625, -101.162109375 78.837890625, -101.2060546875 78.837890625, -101.2060546875 78.7939453125, -100.9423828125 78.7939453125, -100.9423828125 78.75, -101.25 78.75, -101.25 78.9697265625)), POLYGON ((-100.8984375 78.75, -100.8984375 78.7939453125, -100.5908203125 78.7939453125, -100.546875 78.7939453125, -100.546875 78.837890625, -100.3271484375 78.837890625, -100.3271484375 78.7939453125, -100.2392578125 78.7939453125, -100.2392578125 78.75, -100.8984375 78.75)))"
+#     )
 
 
 @pytest.fixture
@@ -508,12 +523,6 @@ def cleantopo_br_tif():
 def cleantopo_br_tif_s3(minio_testdata_bucket):
     """Fixture for cleantopo_br.tif"""
     return prepare_s3_testfile(minio_testdata_bucket, "cleantopo_br.tif")
-
-
-@pytest.fixture
-def cleantopo_tl_tif():
-    """Fixture for cleantopo_tl.tif"""
-    return TESTDATA_DIR / "cleantopo_tl.tif"
 
 
 @pytest.fixture
@@ -612,6 +621,15 @@ def custom_grid_json():
 
 
 # example mapchete configurations
+@pytest.fixture
+def typed_raster_input(mp_tmpdir):
+    """Fixture for typed_raster_input.mapchete."""
+    with ProcessFixture(
+        TESTDATA_DIR / "typed_raster_input.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
 @pytest.fixture
 def custom_grid(mp_tmpdir):
     """Fixture for custom_grid.mapchete."""
@@ -730,6 +748,15 @@ def env_storage_options_mapchete(mp_tmpdir):
 
 
 @pytest.fixture
+def env_input_path_mapchete(mp_tmpdir):
+    """Fixture for env_input_path.mapchete."""
+    with ProcessFixture(
+        TESTDATA_DIR / "env_input_path.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
+@pytest.fixture
 def example_custom_process_mapchete(mp_tmpdir):
     """Fixture for example.mapchete."""
     with ProcessFixture(
@@ -843,25 +870,6 @@ def geojson_s3(mp_s3_tmpdir):
     """Fixture for geojson.mapchete with updated output path."""
     with ProcessFixture(
         TESTDATA_DIR / "geojson.mapchete",
-        output_tempdir=mp_s3_tmpdir,
-    ) as example:
-        yield example
-
-
-@pytest.fixture
-def geobuf(mp_tmpdir):
-    """Fixture for geobuf.mapchete."""
-    with ProcessFixture(
-        TESTDATA_DIR / "geobuf.mapchete", output_tempdir=mp_tmpdir
-    ) as example:
-        yield example
-
-
-@pytest.fixture
-def geobuf_s3(mp_s3_tmpdir):
-    """Fixture for geobuf.mapchete with updated output path."""
-    with ProcessFixture(
-        TESTDATA_DIR / "geobuf.mapchete",
         output_tempdir=mp_s3_tmpdir,
     ) as example:
         yield example
@@ -1041,6 +1049,15 @@ def green_raster(mp_tmpdir):
 
 
 @pytest.fixture
+def dask_specs(mp_tmpdir):
+    """Fixture for dask_specs.mapchete."""
+    with ProcessFixture(
+        TESTDATA_DIR / "dask_specs.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
+@pytest.fixture
 def tile_path_schema(mp_tmpdir):
     """Fixture for tile_path_schema.mapchete."""
     with ProcessFixture(
@@ -1081,3 +1098,109 @@ def threads_executor():
     """ConcurrentFuturesExecutor()"""
     with ConcurrentFuturesExecutor(concurrency="threads") as executor:
         yield executor
+
+
+@pytest.fixture
+def example_clip(mp_tmpdir):
+    """Fixture for examples/clip/clip.mapchete."""
+    with ProcessFixture(
+        EXAMPLES_DIR / "clip/clip.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
+@pytest.fixture
+def example_contours(mp_tmpdir):
+    """Fixture for examples/contours/contours.mapchete."""
+    with ProcessFixture(
+        EXAMPLES_DIR / "contours/contours.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
+@pytest.fixture
+def example_custom_grid(mp_tmpdir):
+    """Fixture for examples/custom_grid/custom_grid.mapchete."""
+    with ProcessFixture(
+        EXAMPLES_DIR / "custom_grid/custom_grid.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
+@pytest.fixture
+def example_file_groups(mp_tmpdir):
+    """Fixture for examples/file_groups/file_groups.mapchete."""
+    with ProcessFixture(
+        EXAMPLES_DIR / "file_groups/file_groups.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
+@pytest.fixture
+def example_hillshade(mp_tmpdir):
+    """Fixture for examples/hillshade/hillshade.mapchete."""
+    with ProcessFixture(
+        EXAMPLES_DIR / "hillshade/hillshade.mapchete", output_tempdir=mp_tmpdir
+    ) as example:
+        yield example
+
+
+@pytest.fixture
+def point() -> Point:
+    return Point(1, 0)
+
+
+@pytest.fixture
+def multipoint() -> MultiPoint:
+    return MultiPoint([Point(0, 0), Point(1, 1)])
+
+
+@pytest.fixture
+def linestring() -> LineString:
+    return LineString([Point(0, 0), Point(1, 1)])
+
+
+@pytest.fixture
+def multilinestring() -> LineString:
+    return MultiLineString(
+        [LineString([Point(0, 0), Point(1, 1)]), LineString([Point(2, 2), Point(3, 3)])]
+    )
+
+
+@pytest.fixture
+def polygon() -> Polygon:
+    return Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])
+
+
+@pytest.fixture
+def multipolygon() -> MultiPolygon:
+    return MultiPolygon(
+        [
+            Polygon([(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)]),
+            Polygon([(2, 2), (3, 2), (3, 3), (2, 3), (2, 2)]),
+        ]
+    )
+
+
+@pytest.fixture
+def geometrycollection(
+    point, multipoint, linestring, multilinestring, polygon, multipolygon
+) -> GeometryCollection:
+    return GeometryCollection(
+        [point, multipoint, linestring, multilinestring, polygon, multipolygon]
+    )
+
+
+@pytest.fixture
+def antimeridian_polygon1() -> Polygon:
+    return box(-175, 0, 175, 5)
+
+
+@pytest.fixture
+def antimeridian_polygon2() -> Polygon:
+    return box(175, 0, 185, 5)
+
+
+@pytest.fixture
+def antimeridian_polygon3(antimeridian_polygon2) -> MultiPolygon:
+    return MultiPolygon([antimeridian_polygon2, box(170, 0, 171, 5)])

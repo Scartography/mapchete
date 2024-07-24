@@ -4,22 +4,18 @@ from copy import deepcopy
 
 import oyaml as yaml
 import pytest
-from fiona.errors import DriverError
 from pydantic import ValidationError
+from pytest_lazyfixture import lazy_fixture
 from shapely import wkt
 from shapely.errors import WKTReadingError
 from shapely.geometry import Polygon, box, mapping, shape
 from shapely.ops import unary_union
 
 import mapchete
-from mapchete.config import (
-    MapcheteConfig,
-    ProcessConfig,
-    ProcessFunc,
-    _guess_geometry,
-    bounds_from_opts,
-    snap_bounds,
-)
+from mapchete.config import MapcheteConfig, ProcessConfig, snap_bounds
+from mapchete.config.models import DaskAdaptOptions, DaskSpecs
+from mapchete.config.parse import bounds_from_opts, guess_geometry
+from mapchete.config.process_func import ProcessFunc
 from mapchete.errors import MapcheteConfigError
 from mapchete.io import fiona_open, rasterio_open
 from mapchete.path import MPath
@@ -74,12 +70,34 @@ def test_config_errors(example_mapchete):
         mapchete.open(config)
 
 
+def test_config_parse_dict(example_mapchete):
+    raw_config = example_mapchete.dict.copy()
+    raw_config.update(process_parameters=dict(foo=dict(bar=1)))
+    config = MapcheteConfig(raw_config)
+    assert config.params_at_zoom(7)["process_parameters"]["foo"]["bar"] == 1
+
+
+def test_config_parse_dict_zoom_overlaps_error(example_mapchete):
+    raw_config = example_mapchete.dict.copy()
+    raw_config.update(process_parameters={"foo": {"zoom<9": 1, "zoom<10": 2}})
+    with pytest.raises(MapcheteConfigError):
+        ProcessConfig.parse(raw_config).zoom_parameters(7)
+
+
+def test_config_parse_dict_not_all_zoom_dependent_error(example_mapchete):
+    raw_config = example_mapchete.dict.copy()
+    raw_config.update(process_parameters={"foo": {"zoom<9": 1, "bar": 2}})
+    with pytest.raises(MapcheteConfigError):
+        ProcessConfig.parse(raw_config).zoom_parameters(7)
+
+
 def test_config_zoom7(example_mapchete, dummy2_tif):
     """Example configuration at zoom 5."""
     config = MapcheteConfig(example_mapchete.dict)
     zoom7 = config.params_at_zoom(7)
     input_files = zoom7["input"]
-    assert input_files["file1"] is None
+    assert input_files["file1"] is not None
+    assert str(input_files["file1"].path) == dummy2_tif
     assert str(input_files["file2"].path) == dummy2_tif
     assert zoom7["process_parameters"]["some_integer_parameter"] == 12
     assert zoom7["process_parameters"]["some_float_parameter"] == 5.3
@@ -170,17 +188,17 @@ def test_effective_bounds(files_bounds, baselevels):
 @pytest.mark.parametrize(
     "example_config",
     [
-        pytest.lazy_fixture("custom_grid"),
-        pytest.lazy_fixture("file_groups"),
-        pytest.lazy_fixture("overviews"),
-        pytest.lazy_fixture("baselevels"),
-        pytest.lazy_fixture("baselevels_output_buffer"),
-        pytest.lazy_fixture("baselevels_custom_nodata"),
-        pytest.lazy_fixture("mapchete_input"),
-        pytest.lazy_fixture("dem_to_hillshade"),
-        pytest.lazy_fixture("env_storage_options_mapchete"),
-        pytest.lazy_fixture("zoom_mapchete"),
-        pytest.lazy_fixture("cleantopo_br_mercator"),
+        lazy_fixture("custom_grid"),
+        lazy_fixture("file_groups"),
+        lazy_fixture("overviews"),
+        lazy_fixture("baselevels"),
+        lazy_fixture("baselevels_output_buffer"),
+        lazy_fixture("baselevels_custom_nodata"),
+        lazy_fixture("mapchete_input"),
+        lazy_fixture("dem_to_hillshade"),
+        lazy_fixture("env_storage_options_mapchete"),
+        lazy_fixture("zoom_mapchete"),
+        lazy_fixture("cleantopo_br_mercator"),
     ],
 )
 def test_effective_area(example_config):
@@ -238,10 +256,19 @@ def test_read_baselevels(baselevels):
 
 
 def test_empty_input(file_groups):
-    """Verify configuration gets parsed without input files."""
+    """Input has to be defined if required by process."""
     config = file_groups.dict
     config.update(input=None)
-    assert mapchete.open(config)
+    with pytest.raises(MapcheteConfigError):
+        mapchete.open(config)
+
+
+def test_input_name_process_params(example_mapchete):
+    """Input has to be defined if required by process."""
+    config = example_mapchete.dict
+    config.update(process_parameters=dict(file1="foo"))
+    with pytest.raises(MapcheteConfigError):
+        mapchete.open(config)
 
 
 def test_read_input_groups(file_groups):
@@ -348,52 +375,56 @@ def test_guess_geometry(aoi_br_geojson):
         area = shape(next(iter(src))["geometry"])
 
     # WKT
-    geom, crs = _guess_geometry(area.wkt)
+    geom, crs = guess_geometry(area.wkt)
     assert geom.is_valid
     assert crs is None
 
     # GeoJSON mapping
-    geom, crs = _guess_geometry(mapping(area))
+    geom, crs = guess_geometry(mapping(area))
     assert geom.is_valid
     assert crs is None
 
     # shapely Geometry
-    geom, crs = _guess_geometry(area)
+    geom, crs = guess_geometry(area)
     assert geom.is_valid
     assert crs is None
 
     # path
-    geom, crs = _guess_geometry(aoi_br_geojson)
+    geom, crs = guess_geometry(aoi_br_geojson)
     assert geom.is_valid
     assert crs
 
     # Errors
     # malformed WKT
     with pytest.raises(WKTReadingError):
-        _guess_geometry(area.wkt.rstrip(")"))
+        guess_geometry(area.wkt.rstrip(")"))
     # non-existent path
-    with pytest.raises(DriverError):
-        _guess_geometry("/invalid_path.geojson")
+    with pytest.raises(FileNotFoundError):
+        guess_geometry("/invalid_path.geojson")
     # malformed GeoJSON mapping
     with pytest.raises(AttributeError):
-        _guess_geometry(dict(mapping(area), type=None))
+        guess_geometry(dict(mapping(area), type=None))
     # unknown type
     with pytest.raises(TypeError):
-        _guess_geometry(1)
+        guess_geometry(1)
     # wrong geometry type
     with pytest.raises(TypeError):
-        _guess_geometry(area.centroid)
+        guess_geometry(area.centroid)
 
 
-def test_bounds_from_opts(example_mapchete, wkt_geom):
+def test_bounds_from_opts_wkt(wkt_geom):
     # WKT
     assert isinstance(bounds_from_opts(wkt_geometry=wkt_geom), Bounds)
 
+
+def test_bounds_from_opts_point(example_mapchete):
     # point
     assert isinstance(
         bounds_from_opts(point=(0, 0), raw_conf=example_mapchete.dict), Bounds
     )
 
+
+def test_bounds_from_opts_point_crs(example_mapchete):
     # point from different CRS
     assert isinstance(
         bounds_from_opts(
@@ -402,11 +433,15 @@ def test_bounds_from_opts(example_mapchete, wkt_geom):
         Bounds,
     )
 
+
+def test_bounds_from_opts_bounds(example_mapchete):
     # bounds
     assert isinstance(
         bounds_from_opts(bounds=(1, 2, 3, 4), raw_conf=example_mapchete.dict), Bounds
     )
 
+
+def test_bounds_from_opts_bounds_crs(example_mapchete):
     # bounds from different CRS
     assert isinstance(
         bounds_from_opts(
@@ -414,6 +449,16 @@ def test_bounds_from_opts(example_mapchete, wkt_geom):
         ),
         Bounds,
     )
+
+
+def test_bounds_from_opts_point_no_conf_error():
+    with pytest.raises(ValueError):
+        bounds_from_opts(point=(0, 0))
+
+
+def test_bounds_from_opts_bounds_no_conf_error():
+    with pytest.raises(ValueError):
+        bounds_from_opts(bounds=(1, 2, 3, 4), bounds_crs="EPSG:3857")
 
 
 def test_init_overrides_config(example_mapchete):
@@ -481,17 +526,23 @@ def test_init_overrides_config(example_mapchete):
 
 def test_custom_process(example_custom_process_mapchete):
     with mapchete.open(example_custom_process_mapchete.dict) as mp:
-        assert (
-            mp.execute(example_custom_process_mapchete.first_process_tile()) is not None
-        )
+        tile = example_custom_process_mapchete.first_process_tile()
+        assert mp.execute_tile(tile) is not None
 
 
 # pytest-env must be installed
-def test_env_params(env_storage_options_mapchete):
+def test_env_storage_options(env_storage_options_mapchete):
     with mapchete.open(env_storage_options_mapchete.dict) as mp:
         inp = mp.config.params_at_zoom(5)
         assert inp["input"]["file1"].storage_options.get("access_key") == "foo"
         assert mp.config.output.storage_options.get("access_key") == "bar"
+
+
+# pytest-env must be installed
+def test_env_params(env_input_path_mapchete):
+    with mapchete.open(env_input_path_mapchete.dict) as mp:
+        inp = mp.config.params_at_zoom(5)
+        assert inp["input"]["file1"].path.endswith("dummy2.tif")
 
 
 def test_process_config_pyramid_settings():
@@ -557,3 +608,42 @@ def test_process_pickle(process_src, example_custom_process_mapchete):
     # pickle and unpickle
     reloaded = pickle.loads(pickle.dumps(process))
     assert reloaded(mp) is not None
+
+
+def test_dask_specs(dask_specs):
+    with dask_specs.mp() as mp:
+        assert isinstance(mp.config.parsed_config.dask_specs, DaskSpecs)
+        assert isinstance(
+            mp.config.parsed_config.dask_specs.adapt_options, DaskAdaptOptions
+        )
+
+
+def test_typed_raster_input(typed_raster_input):
+    with mapchete.open(typed_raster_input.path) as mp:
+        list(mp.execute(concurrency=None))
+
+
+@pytest.mark.skip(reason="just have this here for future reference")
+def test_input_union_special_case():
+    inputs_bboxes = [
+        wkt.loads(
+            "POLYGON ((61.87774658203125 25.31524658203125, 61.87774658203125 22.499459088891662, 61.54664001798359 22.50000394977196, 61.551935808978804 24.204692898426533, 60.46875 24.34987565522143, 59.670821629213485 24.45682447197602, 59.05975341796875 24.538727841428283, 59.05975341796875 25.31524658203125, 61.87774658203125 25.31524658203125))"
+        ),
+        wkt.loads(
+            "POLYGON ((61.87774658203125 22.49725341796875, 61.54663101769545 22.49725341796875, 61.54664001798359 22.50018469008428, 61.87774658203125 22.500173492502597, 61.87774658203125 22.49725341796875))"
+        ),
+        wkt.loads(
+            "POLYGON ((59.05975341796875 22.49725341796875, 59.05975341796875 24.538727841428283, 59.0625 24.5383597085117, 59.160145469148475 24.52527198313532, 59.670821629213485 24.45682447197602, 60.46875 24.34987565522143, 61.551935808978804 24.204692898426533, 61.54668582675388 22.49725341796875, 59.05975341796875 22.49725341796875))"
+        ),
+    ]
+    # inputs are not overlapping but touching each other. however, there is a slight gap between them resulting in
+    # a square with a little line in between.
+    input_union = unary_union(inputs_bboxes)
+    assert input_union.area
+    init_area = wkt.loads(
+        "POLYGON ((61.875 22.5, 59.0625 22.5, 59.0625 25.3125, 61.875 25.3125, 61.875 22.5))"
+    )
+    # when intersected with a perfect square (the init_area), instead of adding the small gap to the output,
+    # the small gap _is_ the output which obviously is wrong
+    config_area_at_zoom = init_area.intersection(input_union)
+    assert config_area_at_zoom.area == pytest.approx(init_area.area)

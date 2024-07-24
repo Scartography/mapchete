@@ -9,8 +9,8 @@ import oyaml as yaml
 from shapely.ops import unary_union
 
 import mapchete
-from mapchete.config import initialize_inputs, open_inputs
-from mapchete.io import fs_from_path
+from mapchete.config.base import initialize_inputs, open_inputs
+from mapchete.executor import SequentialExecutor
 from mapchete.path import MPath
 from mapchete.tile import BufferedTilePyramid
 
@@ -32,7 +32,7 @@ def dict_from_mapchete(path):
     return out
 
 
-def dict_to_yaml(dictionary):
+def clear_dict(dictionary) -> dict:
     def _convert(vv):
         out = OrderedDict()
         for k, v in vv.items():
@@ -43,7 +43,7 @@ def dict_to_yaml(dictionary):
             out[k] = v
         return out
 
-    return yaml.dump(_convert(dictionary))
+    return _convert(dictionary)
 
 
 class ProcessFixture:
@@ -98,9 +98,7 @@ class ProcessFixture:
             self.path = self._tempdir / self.path.name
 
             # dump modified mapchete config to temporary directory
-            self.path.parent.makedirs()
-            with self.path.open("w") as dst:
-                dst.write(dict_to_yaml(self.dict))
+            self.path.write_yaml(clear_dict(self.dict))
 
         # shortcut to output path
         self.output_path = self.dict["output"]["path"]
@@ -140,17 +138,15 @@ class ProcessFixture:
             input=mp.config.get_inputs_for_tile(tile),
         )
 
-    def mp(self, batch_preprocess=True):
+    def mp(self, batch_preprocess=True, bounds=None, zoom=None):
         """
         Return Mapchete object from mapchete.open().
         """
-        from mapchete._executor import SequentialExecutor
-
         with SequentialExecutor() as executor:
             if not self._mp:
-                self._mp = mapchete.open(self.dict)
+                self._mp = mapchete.open(self.dict, bounds=bounds, zoom=zoom)
                 if batch_preprocess:
-                    self._mp.batch_preprocess(executor=executor)
+                    self._mp.execute_preprocessing_tasks(executor=executor)
 
             return self._mp
 

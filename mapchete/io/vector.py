@@ -8,7 +8,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, Union
 
 import fiona
-from fiona.errors import DriverError, FionaError, FionaValueError
+from fiona.errors import DriverError
 from fiona.io import MemoryFile
 from rasterio.crs import CRS
 from retry import retry
@@ -17,17 +17,18 @@ from shapely.geometry import base, box, mapping, shape
 from tilematrix import clip_geometry_to_srs_bounds
 
 from mapchete.errors import MapcheteIOError, NoCRSError, NoGeoError
-from mapchete.io import copy
-from mapchete.io._geometry_operations import (
-    _repair,
-    clean_geometry_type,
+from mapchete.geometry import (
+    filter_by_geometry_type,
     multipart_to_singleparts,
+    repair,
     reproject_geometry,
     segmentize_geometry,
     to_shape,
 )
-from mapchete.io.settings import MAPCHETE_IO_RETRY_SETTINGS
-from mapchete.path import MPath, fs_from_path, path_exists
+from mapchete.geometry.types import get_geometry_type
+from mapchete.io import copy
+from mapchete.path import MPath, fs_from_path
+from mapchete.settings import IORetrySettings
 from mapchete.types import Bounds
 from mapchete.validate import validate_bounds
 
@@ -36,7 +37,6 @@ __all__ = [
     "segmentize_geometry",
     "to_shape",
     "multipart_to_singleparts",
-    "clean_geometry_type",
 ]
 
 logger = logging.getLogger(__name__)
@@ -63,10 +63,21 @@ def fiona_read(path, mode="r", **kwargs):
     """
     path = MPath.from_inp(path)
 
-    with path.fio_env() as env:
-        logger.debug("reading %s with GDAL options %s", str(path), env.options)
-        with fiona.open(str(path), mode=mode, **kwargs) as src:
-            yield src
+    try:
+        with path.fio_env() as env:
+            logger.debug("reading %s with GDAL options %s", str(path), env.options)
+            with fiona.open(str(path), mode=mode, **kwargs) as src:
+                yield src
+    except DriverError as exc:
+        for i in (
+            "does not exist in the file system",
+            "No such file or directory",
+            "specified key does not exist.",
+        ):
+            if i in str(repr(exc)):
+                raise FileNotFoundError(f"path {str(path)} does not exist")
+        else:  # pragma: no cover
+            raise
 
 
 @contextmanager
@@ -210,9 +221,6 @@ def write_vector_window(
     """
     Write features to file.
 
-    When the output driver is 'Geobuf', the geobuf library will be used otherwise the
-    driver will be passed on to Fiona.
-
     Parameters
     ----------
     in_data : features
@@ -231,16 +239,12 @@ def write_vector_window(
     for feature in in_data:
         try:
             # clip feature geometry to tile bounding box and append for writing
-            clipped = clean_geometry_type(
+            for out_geom in filter_by_geometry_type(
                 to_shape(feature["geometry"]).intersection(out_tile.bbox),
-                out_schema["geometry"],
-            )
-            if allow_multipart_geometries:
-                cleaned_output_fetures = [clipped]
-            else:
-                cleaned_output_fetures = multipart_to_singleparts(clipped)
-            for out_geom in cleaned_output_fetures:
-                if out_geom.is_empty:  # pragma: no cover
+                get_geometry_type(out_schema["geometry"]),
+                allow_multipart=allow_multipart_geometries,
+            ):
+                if out_geom.is_empty:
                     continue
 
                 out_features.append(
@@ -253,27 +257,15 @@ def write_vector_window(
     # write if there are output features
     if out_features:
         try:
-            if out_driver.lower() in ["geobuf"]:
-                # write data to remote file
-                with VectorWindowMemoryFile(
-                    tile=out_tile,
-                    features=out_features,
-                    schema=out_schema,
-                    driver=out_driver,
-                ) as memfile:
-                    logger.debug((out_tile.id, "write tile", out_path))
-                    with out_path.open("wb") as dst:
-                        dst.write(memfile)
-            else:  # pragma: no cover
-                with fiona_open(
-                    out_path,
-                    "w",
-                    schema=out_schema,
-                    driver=out_driver,
-                    crs=out_tile.crs.to_dict(),
-                ) as dst:
-                    logger.debug((out_tile.id, "write tile", out_path))
-                    dst.writerecords(out_features)
+            with fiona_open(
+                out_path,
+                "w",
+                schema=out_schema,
+                driver=out_driver,
+                crs=out_tile.crs.to_dict(),
+            ) as dst:
+                logger.debug((out_tile.id, "write tile", out_path))
+                dst.writerecords(out_features)
         except Exception as e:
             logger.error("error while writing file %s: %s", out_path, e)
             raise
@@ -282,49 +274,9 @@ def write_vector_window(
         logger.debug((out_tile.id, "nothing to write", out_path))
 
 
-class VectorWindowMemoryFile:
-    """Context manager around fiona.io.MemoryFile."""
-
-    def __init__(self, tile=None, features=None, schema=None, driver=None):
-        """Prepare data & profile."""
-        self.tile = tile
-        self.schema = schema
-        self.driver = driver
-        self.features = features
-
-    def __enter__(self):
-        """Open MemoryFile, write data and return."""
-        if self.driver.lower() == "geobuf":
-            import geobuf
-
-            return geobuf.encode(
-                dict(
-                    type="FeatureCollection",
-                    features=[dict(f, type="Feature") for f in self.features],
-                )
-            )
-        else:  # pragma: no cover
-            # this part is excluded now for tests as we try to let fiona write directly
-            # to S3
-            self.fio_memfile = MemoryFile()
-            with self.fio_memfile.open(
-                schema=self.schema, driver=self.driver, crs=self.tile.crs
-            ) as dst:
-                dst.writerecords(self.features)
-            return self.fio_memfile.getbuffer()
-
-    def __exit__(self, *args):
-        """Make sure MemoryFile is closed."""
-        try:
-            self.fio_memfile.close()
-        except AttributeError:
-            pass
-
-
 @retry(
     logger=logger,
-    exceptions=(DriverError, FionaError, FionaValueError),
-    **MAPCHETE_IO_RETRY_SETTINGS,
+    **dict(IORetrySettings()),
 )
 def _get_reprojected_features(
     inp=None,
@@ -336,35 +288,8 @@ def _get_reprojected_features(
     logger.debug("reading %s", inp)
     with ExitStack() as exit_stack:
         if isinstance(inp, (str, MPath)):
-            try:
-                src = exit_stack.enter_context(fiona_open(inp, "r"))
-                src_crs = CRS(src.crs)
-            except Exception as e:
-                # fiona errors which indicate file does not exist
-                for i in (
-                    "does not exist in the file system",
-                    "No such file or directory",
-                    "The specified key does not exist",
-                ):
-                    if i in str(e):
-                        raise FileNotFoundError(
-                            "%s not found and cannot be opened with Fiona" % inp
-                        )
-                else:
-                    try:
-                        # NOTE: this can cause addional S3 requests
-                        exists = path_exists(inp)
-                    except Exception:  # pragma: no cover
-                        # in order not to mask the original fiona exception, raise it
-                        raise e
-                    if exists:
-                        # raise fiona exception
-                        raise e
-                    else:  # pragma: no cover
-                        # file does not exist
-                        raise FileNotFoundError(
-                            "%s not found and cannot be opened with Fiona" % inp
-                        )
+            src = exit_stack.enter_context(fiona_open(inp, "r"))
+            src_crs = CRS(src.crs)
         else:
             src = inp
             src_crs = inp.crs
@@ -381,28 +306,27 @@ def _get_reprojected_features(
         for feature in src.filter(bbox=dst_bbox.bounds):
             try:
                 # check validity
-                original_geom = _repair(to_shape(feature["geometry"]))
+                original_geom = repair(to_shape(feature["geometry"]))
 
                 # clip with bounds and omit if clipped geometry is empty
                 clipped_geom = original_geom.intersection(dst_bbox)
-
-                # reproject each feature to tile CRS
-                g = reproject_geometry(
-                    clean_geometry_type(
-                        clipped_geom,
-                        original_geom.geom_type,
-                        raise_exception=False,
-                    ),
-                    src_crs=src_crs,
-                    dst_crs=dst_crs,
-                    validity_check=validity_check,
-                    clip_to_crs_bounds=False,
-                )
-                if not g.is_empty:
-                    yield {
-                        "properties": feature["properties"],
-                        "geometry": mapping(g),
-                    }
+                for checked_geom in filter_by_geometry_type(
+                    clipped_geom,
+                    original_geom.geom_type,
+                ):
+                    # reproject each feature to tile CRS
+                    reprojected_geom = reproject_geometry(
+                        checked_geom,
+                        src_crs=src_crs,
+                        dst_crs=dst_crs,
+                        validity_check=validity_check,
+                        clip_to_crs_bounds=False,
+                    )
+                    if not reprojected_geom.is_empty:
+                        yield {
+                            "properties": feature["properties"],
+                            "geometry": mapping(reprojected_geom),
+                        }
             # this can be handled quietly
             except TopologicalError as e:  # pragma: no cover
                 logger.warning("feature omitted: %s", e)

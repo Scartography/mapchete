@@ -30,6 +30,8 @@ compress: string
     CCITTFAX3, CCITTFAX4, lzma
 """
 
+from __future__ import annotations
+
 import logging
 import math
 import os
@@ -39,16 +41,15 @@ from contextlib import ExitStack
 import numpy as np
 from affine import Affine
 from numpy import ma
-from rasterio.enums import Resampling
-from rasterio.profiles import Profile
 from rasterio.rio.overview import get_maximum_overview_level
 from rasterio.windows import from_bounds
 from shapely.geometry import box
 from tilematrix import Bounds
 
-from mapchete.config import _OUTPUT_PARAMETERS, snap_bounds, validate_values
+from mapchete.config.base import _OUTPUT_PARAMETERS, snap_bounds
 from mapchete.errors import MapcheteConfigError
 from mapchete.formats import base
+from mapchete.formats.protocols import RasterInput
 from mapchete.io import MPath, path_exists, path_is_remote
 from mapchete.io.profiles import DEFAULT_PROFILES
 from mapchete.io.raster import (
@@ -60,7 +61,8 @@ from mapchete.io.raster import (
     write_raster_window,
 )
 from mapchete.tile import BufferedTile
-from mapchete.validate import deprecated_kwargs
+from mapchete.types import to_resampling
+from mapchete.validate import deprecated_kwargs, validate_values
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +200,7 @@ class GTiffOutputReaderFunctions:
         )
 
     @deprecated_kwargs
-    def open(self, tile, process, **kwargs):
+    def open(self, tile, process, **kwargs) -> InputTile:
         """
         Open process output as input for other process.
 
@@ -368,13 +370,12 @@ class GTiffTileDirectoryOutputWriter(
                 self.prepare_path(tile)
                 out_tile = BufferedTile(tile, self.pixelbuffer)
                 write_raster_window(
-                    in_tile=process_tile,
+                    in_grid=process_tile,
                     in_data=data,
                     out_profile=self.profile(out_tile),
-                    out_tile=out_tile,
+                    out_grid=out_tile,
                     out_path=out_path,
                     tags=tags,
-                    fs=self.fs,
                 )
 
     @property
@@ -462,8 +463,8 @@ class GTiffSingleFileOutputWriter(
         )
         if self.cog or "overviews" in self.output_params:
             self.overviews = True
-            self.overviews_resampling = self.output_params.get(
-                "overviews_resampling", "nearest"
+            self.overviews_resampling = to_resampling(
+                self.output_params.get("overviews_resampling", "nearest")
             )
             self.overviews_levels = self.output_params.get(
                 "overviews_levels",
@@ -587,8 +588,6 @@ class GTiffSingleFileOutputWriter(
                     from_bounds(
                         *out_tile.bounds,
                         transform=self.dst.transform,
-                        height=self.dst.height,
-                        width=self.dst.width,
                     )
                     .round_lengths(pixel_precision=0)
                     .round_offsets(pixel_precision=0)
@@ -596,13 +595,15 @@ class GTiffSingleFileOutputWriter(
                 if _window_in_out_file(write_window, self.dst):
                     logger.debug("write data to window: %s", write_window)
                     self.dst.write(
-                        extract_from_array(
-                            in_raster=data,
-                            in_affine=process_tile.affine,
-                            out_tile=out_tile,
-                        )
-                        if process_tile != out_tile
-                        else data,
+                        (
+                            extract_from_array(
+                                array=data,
+                                in_affine=process_tile.affine,
+                                out_tile=out_tile,
+                            )
+                            if process_tile != out_tile
+                            else data
+                        ),
                         window=write_window,
                     )
 
@@ -630,12 +631,10 @@ class GTiffSingleFileOutputWriter(
                         self.overviews_levels,
                     )
                     self.dst.build_overviews(
-                        self.overviews_levels, Resampling[self.overviews_resampling]
+                        self.overviews_levels, self.overviews_resampling
                     )
                     self.dst.update_tags(
-                        OVR_RESAMPLING_ALG=Resampling[
-                            self.overviews_resampling
-                        ].name.upper()
+                        OVR_RESAMPLING_ALG=self.overviews_resampling.name.upper()
                     )
         finally:
             self._ctx.__exit__(exc_type, exc_value, exc_traceback)
@@ -652,7 +651,7 @@ def _window_in_out_file(window, rio_file):
     )
 
 
-class InputTile(base.InputTile):
+class InputTile(base.InputTile, RasterInput):
     """
     Target Tile representation of input data.
 

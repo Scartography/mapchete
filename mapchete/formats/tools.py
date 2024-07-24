@@ -12,13 +12,13 @@ from typing import Dict
 
 import dateutil.parser
 from rasterio.crs import CRS
-from shapely.geometry import mapping
 from shapely.geometry.base import BaseGeometry
 
-from mapchete._registered import drivers
 from mapchete.errors import MapcheteConfigError, MapcheteDriverError
-from mapchete.io import MPath, fiona_open, rasterio_open, read_json, write_json
+from mapchete.io import MPath, fiona_open, rasterio_open
+from mapchete.registered import drivers
 from mapchete.tile import BufferedTilePyramid
+from mapchete.types import MPathLike
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ def driver_metadata(driver_name: str) -> Dict:
         raise ValueError(f"driver '{driver_name}' not found")
 
 
-def driver_from_file(input_file: str, quick: bool = True) -> str:
+def driver_from_file(input_file: MPathLike, quick: bool = True) -> str:
     """
     Guess driver from file by opening it.
 
@@ -237,7 +237,7 @@ def dump_metadata(params: Dict, parse_datetime=True) -> Dict:
     return _unparse_dict(out, strategies=strategies) if parse_datetime else out
 
 
-def read_output_metadata(metadata_json: str, **kwargs: str) -> Dict:
+def read_output_metadata(metadata_json: MPathLike, **kwargs: str) -> Dict:
     """
     Read and parse metadata.json.
 
@@ -251,7 +251,7 @@ def read_output_metadata(metadata_json: str, **kwargs: str) -> Dict:
         Parsed output metadata.
     """
 
-    return load_metadata(read_json(metadata_json, **kwargs))
+    return load_metadata(MPath.from_inp(metadata_json).read_json())
 
 
 def load_metadata(params: Dict, parse_known_types=True) -> Dict:
@@ -275,7 +275,12 @@ def load_metadata(params: Dict, parse_known_types=True) -> Dict:
         raise TypeError(f"metadata parameters must be a dictionary, not {params}")
     out = params.copy()
     grid = out["pyramid"]["grid"]
-    if grid["type"] == "geodetic" and grid["shape"] == [2, 1]:  # pragma: no cover
+    if "type" in grid:  # pragma: no cover
+        warnings.warn(DeprecationWarning("'type' is deprecated and should be 'grid'"))
+        if "grid" not in grid:
+            grid["grid"] = grid.pop("type")
+
+    if grid["grid"] == "geodetic" and grid["shape"] == [2, 1]:  # pragma: no cover
         warnings.warn(
             DeprecationWarning(
                 "Deprecated grid shape ordering found. "
@@ -333,7 +338,7 @@ def write_output_metadata(output_params: Dict) -> None:
             logger.debug("%s does not exist", metadata_path)
             dump_params = dump_metadata(output_params)
             # dump output metadata
-            write_json(metadata_path, dump_params)
+            metadata_path.write_json(dump_params)
 
 
 def compare_metadata_params(params1: Dict, params2: Dict) -> None:

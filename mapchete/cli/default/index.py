@@ -3,12 +3,11 @@
 import logging
 
 import click
-import click_spinner
 import tqdm
 
-import mapchete
 from mapchete import commands
 from mapchete.cli import options
+from mapchete.cli.progress_bar import PBar
 
 # workaround for https://github.com/tqdm/tqdm/issues/481
 tqdm.monitor_interval = 0
@@ -22,6 +21,7 @@ logger = logging.getLogger(__name__)
 @options.opt_geojson
 @options.opt_gpkg
 @options.opt_shp
+@options.opt_fgb
 @options.opt_vrt
 @options.opt_txt
 @options.opt_fieldname
@@ -52,16 +52,14 @@ def index(*args, debug=False, no_pbar=False, verbose=False, logfile=None, **kwar
                 f"'--{x} foo' is deprecated. You should use '--fs-opts {x}=foo' instead.",
             )
         kwargs.pop(x)
-    list(
-        tqdm.tqdm(
-            commands.index(
-                *args,
-                as_iterator=True,
-                msg_callback=tqdm.tqdm.write if verbose else None,
-                **kwargs,
-            ),
-            unit="tile",
-            disable=debug or no_pbar,
+
+    with PBar(
+        total=100, desc="tiles", disable=debug or no_pbar, print_messages=verbose
+    ) as pbar:
+        kwargs.update(some_input=kwargs.pop("tiledir"))
+        commands.index(
+            *args,
+            observers=[pbar],
+            **kwargs,
         )
-    )
     tqdm.tqdm.write(f"index(es) creation for {kwargs.get('tiledir')} finished")

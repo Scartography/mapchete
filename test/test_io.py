@@ -3,10 +3,12 @@
 import os
 
 import pytest
+from pytest_lazyfixture import lazy_fixture
 from shapely.errors import TopologicalError
 
 import mapchete
 from mapchete.io import (
+    MatchingMethod,
     absolute_path,
     copy,
     get_best_zoom_level,
@@ -28,12 +30,12 @@ def test_best_zoom_level(dummy1_tif):
     assert get_best_zoom_level(dummy1_tif, "mercator")
 
 
-@pytest.mark.remote
+@pytest.mark.integration
 def test_s3_path_exists(raster_4band_s3):
     assert path_exists(raster_4band_s3)
 
 
-@pytest.mark.remote
+@pytest.mark.integration
 def test_remote_path_exists(http_raster):
     assert path_exists(http_raster)
     assert not path_exists(http_raster / "non_existing.tif")
@@ -56,29 +58,30 @@ def test_absolute_path():
     )
 
 
-@pytest.mark.remote
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.lazy_fixture("s3_metadata_json"),
-        pytest.lazy_fixture("http_metadata_json"),
+        lazy_fixture("s3_metadata_json"),
+        lazy_fixture("http_metadata_json"),
     ],
 )
 def test_read_remote_json(path):
     assert isinstance(read_json(path), dict)
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.lazy_fixture("s3_metadata_json"),
-        pytest.lazy_fixture("http_metadata_json"),
+        lazy_fixture("s3_metadata_json"),
+        lazy_fixture("http_metadata_json"),
     ],
 )
 def test_read_remote_json_errors(path):
     # keep access credentials but invalidate URI
     path = path + "not_here"
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError):  # type: ignore
         read_json(path)
 
 
@@ -92,7 +95,9 @@ def test_tile_to_zoom_level():
     # at Northern boundary
     assert tile_to_zoom_level(tp_merc.tile(zoom, 0, col), tp_geod) == 9
     assert (
-        tile_to_zoom_level(tp_merc.tile(zoom, 0, col), tp_geod, matching_method="min")
+        tile_to_zoom_level(
+            tp_merc.tile(zoom, 0, col), tp_geod, matching_method=MatchingMethod.min
+        )
         == 12
     )
     # at Equator
@@ -106,7 +111,7 @@ def test_tile_to_zoom_level():
         tile_to_zoom_level(
             tp_merc.tile(zoom, tp_merc.matrix_height(zoom) // 2, col),
             tp_geod,
-            matching_method="min",
+            matching_method=MatchingMethod.min,
         )
         == 9
     )
@@ -121,7 +126,7 @@ def test_tile_to_zoom_level():
         tile_to_zoom_level(
             tp_merc.tile(zoom, tp_merc.matrix_height(zoom) - 1, col),
             tp_geod,
-            matching_method="min",
+            matching_method=MatchingMethod.min,
         )
         == 12
     )
@@ -129,7 +134,7 @@ def test_tile_to_zoom_level():
         tile_to_zoom_level(
             BufferedTilePyramid("mercator", metatiling=2, pixelbuffer=20).tile(4, 0, 7),
             BufferedTilePyramid("geodetic", metatiling=8, pixelbuffer=20),
-            matching_method="gdal",
+            matching_method=MatchingMethod.gdal,
         )
         == 4
     )
@@ -146,7 +151,9 @@ def test_tile_to_zoom_level_geodetic_from_mercator():
     # NOTE: using a newer proj version (8.2.0) will yield different results
     assert tile_to_zoom_level(tp_geod.tile(zoom, 0, col), tp_merc) in [0, 2]
     with pytest.raises(TopologicalError):
-        tile_to_zoom_level(tp_geod.tile(zoom, 0, col), tp_merc, matching_method="min")
+        tile_to_zoom_level(
+            tp_geod.tile(zoom, 0, col), tp_merc, matching_method=MatchingMethod.min
+        )
     # at Equator
     assert (
         tile_to_zoom_level(
@@ -158,7 +165,7 @@ def test_tile_to_zoom_level_geodetic_from_mercator():
         tile_to_zoom_level(
             tp_geod.tile(zoom, tp_geod.matrix_height(zoom) // 2, col),
             tp_merc,
-            matching_method="min",
+            matching_method=MatchingMethod.min,
         )
         == 10
     )
@@ -171,7 +178,7 @@ def test_tile_to_zoom_level_geodetic_from_mercator():
         tile_to_zoom_level(
             tp_geod.tile(zoom, tp_geod.matrix_height(zoom) - 1, col),
             tp_merc,
-            matching_method="min",
+            matching_method=MatchingMethod.min,
         )
 
     # check wrong method
@@ -179,7 +186,7 @@ def test_tile_to_zoom_level_geodetic_from_mercator():
         tile_to_zoom_level(
             tp_geod.tile(zoom, tp_geod.matrix_height(zoom) - 1, col),
             tp_merc,
-            matching_method="invalid_method",
+            matching_method="invalid_method",  # type: ignore
         )
 
 
@@ -195,44 +202,46 @@ def test_tiles_exist_local(example_mapchete):
         bounds=bounds,
     ) as mp:
         # generate tile directory
-        mp.batch_process(zoom=zoom)
+        list(mp.execute(zoom=zoom))
         process_tiles = list(mp.config.process_pyramid.tiles_from_bounds(bounds, zoom))
         output_tiles = list(mp.config.output_pyramid.tiles_from_bounds(bounds, zoom))
 
         # see which files were written and create set for output_tiles and process_tiles
-        out_path = os.path.join(
-            SCRIPTDIR, example_mapchete.dict["output"]["path"], str(zoom)
-        )
         written_output_tiles = set()
-        for root, dirs, files in os.walk(out_path):
-            for file in files:
-                zoom, row = map(int, root.split("/")[-2:])
-                col = int(file.split(".")[0])
+        for rowdir in (example_mapchete.output_path / zoom).ls():
+            for file in rowdir.ls():
+                zoom, row, col = map(int, file.without_suffix().elements[-3:])
                 written_output_tiles.add(mp.config.output_pyramid.tile(zoom, row, col))
-        written_process_tiles = set(
-            [mp.config.process_pyramid.intersecting(t)[0] for t in written_output_tiles]
+
+        full_process_tiles = set(
+            [
+                tile
+                for tile in process_tiles
+                if all(
+                    [
+                        output_tile in written_output_tiles
+                        for output_tile in mp.config.output_pyramid.intersecting(tile)
+                    ]
+                )
+            ]
         )
 
         # process tiles
         existing = set()
         not_existing = set()
-        for tile, exists in tiles_exist(
-            config=mp.config, process_tiles=process_tiles, multi=4
-        ):
+        for tile, exists in tiles_exist(config=mp.config, process_tiles=process_tiles):
             if exists:
                 existing.add(tile)
             else:
                 not_existing.add(tile)
-        assert existing == written_process_tiles
+        assert existing == full_process_tiles
         assert not_existing
         assert set(process_tiles) == existing.union(not_existing)
 
         # output tiles
         existing = set()
         not_existing = set()
-        for tile, exists in tiles_exist(
-            config=mp.config, output_tiles=output_tiles, multi=1
-        ):
+        for tile, exists in tiles_exist(config=mp.config, output_tiles=output_tiles):
             if exists:
                 existing.add(tile)
             else:
@@ -242,6 +251,7 @@ def test_tiles_exist_local(example_mapchete):
         assert set(output_tiles) == existing.union(not_existing)
 
 
+@pytest.mark.integration
 def test_tiles_exist_s3(gtiff_s3):
     bounds = (0, 0, 10, 10)
     # bounds = (3, 1, 4, 2)
@@ -256,17 +266,26 @@ def test_tiles_exist_s3(gtiff_s3):
         mode="overwrite",
     ) as mp:
         # generate tile directory
-        mp.batch_process(zoom=zoom)
+        list(mp.execute(zoom=zoom))
         process_tiles = list(mp.config.process_pyramid.tiles_from_bounds(bounds, zoom))
         output_tiles = list(mp.config.output_pyramid.tiles_from_bounds(bounds, zoom))
 
         # manually check which tiles exist
         written_output_tiles = set()
-        for t in output_tiles:
-            if mp.config.output_reader.tiles_exist(output_tile=t):
-                written_output_tiles.add(t)
-        written_process_tiles = set(
-            [mp.config.process_pyramid.intersecting(t)[0] for t in written_output_tiles]
+        for tt in output_tiles:
+            if mp.config.output_reader.tiles_exist(output_tile=tt):  # type: ignore
+                written_output_tiles.add(tt)
+        full_process_tiles = set(
+            [
+                tile
+                for tile in process_tiles
+                if all(
+                    [
+                        output_tile in written_output_tiles
+                        for output_tile in mp.config.output_pyramid.intersecting(tile)
+                    ]
+                )
+            ]
         )
 
         # process tiles
@@ -279,7 +298,7 @@ def test_tiles_exist_s3(gtiff_s3):
                 existing.add(tile)
             else:
                 not_existing.add(tile)
-        assert existing == written_process_tiles
+        assert existing == full_process_tiles
         assert set(process_tiles) == existing.union(not_existing)
 
         # output tiles

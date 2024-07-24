@@ -4,6 +4,233 @@ Changelog
 
 
 ---------------------
+2024.7.0 - 2024-07-24
+---------------------
+
+* core
+
+  * add `mapchete.geometry` module (move relevant geometry operations from `io.vector` to `geometry` module) (#630)
+  * fixed bug where configuration was not properly passed if an element had only one subitem (#635)
+  * fix memray deprecation (#637)
+
+* packaging
+
+  * fix pystac version limit (#633)
+
+* CI
+
+  * remove coveralls and use GitHub actions to report on test coverage
+  * remove support for Python 3.8 and 3.9
+  * add tests for Python 3.12 and `ubuntu-latest`
+
+---------------------
+2024.6.0 - 2024-06-03
+---------------------
+
+* core
+
+  * `path`: set `AWS_HTTPS` depending on custom `endpoint_url`
+
+
+---------------------
+2024.5.2 - 2024-05-15
+---------------------
+
+* packaging
+
+  * remove `protobuf`` dependency
+
+
+---------------------
+2024.5.1 - 2024-05-15
+---------------------
+
+* core
+
+  * remove Geobuf driver (#629)
+  * enable typing for processes (#626)
+
+* packaging
+
+  * remove `geobuf` and `protobuf`` dependency
+
+
+---------------------
+2024.5.0 - 2024-05-02
+---------------------
+
+* core
+
+  * also include `executor_getter()` call within `try ... except` block in order to be able to retry eventual connection errors (#627)
+
+
+---------------------
+2024.2.1 - 2024-02-20
+---------------------
+
+* core
+
+  * add `mpath` CLI (#620)
+  * `io.vector.fiona_open()` now properly raises a `FileNotFoundError` (#620)
+  * removed deprecated `log.user_process_logger()` and `log.driver_logger()` (#620)
+
+
+---------------------
+2024.2.0 - 2024-02-14
+---------------------
+
+* core
+
+  * use `repr(exception)` when reporting Exception to observers (#617)
+  * fix tiles exist check on output tiles smaller than process tiles #622
+
+* CI
+
+  * avoid pytest 8 for now
+
+
+---------------------
+2024.1.3 - 2024-01-15
+---------------------
+
+* core
+
+  * `commands.execute()`: avoid reporting on exception twice; send notification message on details of retry attempt (#614)
+  * `settings.IORetrySettings`: add ServerDisconnectedError and FSTimeoutError to retryable exceptions (#615)
+  * `executor.future.MFuture`: keep CancelledError from dask instead of wrapping it within a MapcheteTaskFailed (#615)
+  * `commands.index()`: add FlatGeobuf as index driver (#616)
+
+
+---------------------
+2024.1.2 - 2024-01-11
+---------------------
+
+* core
+
+  * determine `FileNotFoundError` directly in `rasterio_read` (#613)
+  * add `Status.pending` (#613)
+
+
+---------------------
+2024.1.1 - 2024-01-11
+---------------------
+
+* core
+
+  * catch dask exception if task exception cannot be retreived and wrap it within `MapcheteTaskFailed` (#612)
+
+
+---------------------
+2024.1.0 - 2024-01-04
+---------------------
+
+* core
+
+  * fix `"type"` `DeprecationWarning` with old `BufferedTilePyramid` parameters (#611)
+  * add `MPath.read_json()`, `MPath.write_json()`, `MPath.read_yaml()` and `MPath.write_yaml()` methods (#611)
+  * explicitly set exception types to be retried in `mapchete.settings.IORetrySettings` (#611)
+  * `mapchete.commands.index`: enable indexing from a `TileDir` input (#611)
+  * `MPapth`: set rasterio environment `GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'` when opening STACTA or VRT
+
+
+----------------------
+2023.12.3 - 2023-12-15
+----------------------
+
+* core
+
+  * introduce `GridProtocol` to replace `tile` argument in raster read functions (#610)
+  * use `Concurrency.none` per default, except in CLI (#610)
+
+
+----------------------
+2023.12.2 - 2023-12-12
+----------------------
+
+* core
+
+  * add `processing.types.LazyTaskInfo` to avoid calling `Future.result()` unnecessarily (#608)
+  * do not keep futures around when submitting a task graph to enable dask to release finished tasks (#608) 
+  * also apply `settings.MapcheteIOSettings` to `path.MPath.read_text()` (#609)
+  * add optional `DaskSpecs` to mapchte configuration schema (#609)
+
+
+----------------------
+2023.12.1 - 2023-12-07
+----------------------
+
+* packaging
+
+  * fix `aiobotocore` versions for `s3` extra
+
+
+----------------------
+2023.12.0 - 2023-12-05
+----------------------
+
+* core
+
+  * complete refactor of `mapchete.commands` (#604)
+  * remove `mapchete.Job` and use observer pattern to track execution state and progress (#604)
+  * refactor `mapchete.processing` (#604)
+  * replace `mapchete.processing.compute` with `mapchete.processing.execute` (#604)
+
+
+----------------------
+2023.11.0 - 2023-11-20
+----------------------
+
+* core
+
+  * add task profiling capabilities (measure memory consumption, S3 requests) (#603)
+  * split up `config.py` and create a better structured `mapchete.config` module (#603)
+  * split up `_executor.py` and create a better structured `mapchete.executor` module (#603)
+  * split up `_core.py` and create a better structured `mapchete.processing` module (#603)
+
+* CLI
+
+  * add `--profiling` flag to `mapchete execute` (#603)
+
+* packaging
+
+  * `dask` is now a required dependency
+
+
+----------------------
+2023.10.0 - 2023-10-18
+----------------------
+
+* packaging
+
+  * require `flask<=3.0.0` (#600)
+  * exclude `aiobotocore` `2.7.0` (#602)
+  * allow `s3fs>2023.9.0` (#594)
+
+* test
+
+  * add pytest markers `integration` and `aws_s3` (#602)
+  * stop testing on ubuntu 20.04 (#600)
+
+
+---------------------
+2023.9.1 - 2023-09-19
+---------------------
+
+* packaging
+
+  * require `pydantic>=2.0.0` (#591)
+  * require `pydantic_basesettings` (#592)
+
+* core
+
+  * add `MPath.without_protocol()` and `MPath.with_protocol()` methods (#587)
+  * let `MPath.ls()` return full S3 paths (#587, fixes #583)
+  * add `mapchete.io.profiles` for rasterio profiles (#588, fixes #584)
+  * support `pydantic>=2.0.0` (#591)
+  * use `pydantic_basesettings` to combine environment variables with default values for `mapchete.io.settings` (#592)
+
+
+---------------------
 2023.9.0 - 2023-09-05
 ---------------------
 

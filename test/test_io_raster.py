@@ -5,8 +5,9 @@ from itertools import product
 import numpy as np
 import numpy.ma as ma
 import pytest
+from pytest_lazyfixture import lazy_fixture
 from rasterio.enums import Compression
-from shapely.geometry import box
+from shapely.geometry import GeometryCollection, box
 from shapely.ops import unary_union
 from tilematrix import Bounds
 
@@ -28,6 +29,7 @@ from mapchete.io.raster import (
     resample_from_array,
     write_raster_window,
 )
+from mapchete.io.raster.array import clip_array_with_vector
 from mapchete.io.vector import reproject_geometry
 from mapchete.tile import BufferedTilePyramid
 
@@ -84,7 +86,7 @@ def test_read_raster_window_input_list(cleantopo_br):
     conf = dict(**cleantopo_br.dict)
     conf["output"].update(metatiling=1)
     with mapchete.open(conf) as mp:
-        mp.batch_process(process_zoom)
+        list(mp.execute(zoom=process_zoom))
         tiles = [
             (tile, mp.config.output.get_path(tile))
             for tile in mp.config.output_pyramid.tiles_from_bounds(
@@ -95,7 +97,7 @@ def test_read_raster_window_input_list(cleantopo_br):
         upper_tile = next(mp.get_process_tiles(process_zoom - 1))
         assert len(tiles) > 1
         resampled = resample_from_array(
-            in_raster=create_mosaic(
+            array=create_mosaic(
                 [(tile, read_raster_window(path, tile)) for tile, path in tiles]
             ),
             out_tile=upper_tile,
@@ -122,12 +124,14 @@ def test_read_raster_window_filenotfound():
         read_raster_window("not_existing.tif", tile)
 
 
+@pytest.mark.integration
 def test_read_raster_window_s3_filenotfound(mp_s3_tmpdir):
     tile = BufferedTilePyramid("geodetic").tile(zoom=13, row=1918, col=8905)
     with pytest.raises(FileNotFoundError):
         read_raster_window(mp_s3_tmpdir / "not_existing.tif", tile)
 
 
+@pytest.mark.integration
 def test_read_raster_window_s3_filenotfound_gdalreaddir(mp_s3_tmpdir):
     tile = BufferedTilePyramid("geodetic").tile(zoom=13, row=1918, col=8905)
     with pytest.raises(FileNotFoundError):
@@ -138,6 +142,7 @@ def test_read_raster_window_s3_filenotfound_gdalreaddir(mp_s3_tmpdir):
         )
 
 
+@pytest.mark.integration
 @pytest.mark.skip(
     reason="this test should pass with a newer GDAL release: https://github.com/OSGeo/gdal/issues/1900"
 )
@@ -198,7 +203,7 @@ def test_write_raster_window():
     ]:
         try:
             write_raster_window(
-                in_tile=tile, in_data=data, out_profile=out_profile, out_path=path
+                in_grid=tile, in_data=data, out_profile=out_profile, out_path=path
             )
             with rasterio_open(path, "r") as src:
                 assert src.read().any()
@@ -226,10 +231,10 @@ def test_write_raster_window():
     )
     try:
         write_raster_window(
-            in_tile=tile,
+            in_grid=tile,
             in_data=data,
             out_profile=out_profile,
-            out_tile=out_tile,
+            out_grid=out_tile,
             out_path=path,
         )
         with rasterio_open(path, "r") as src:
@@ -239,51 +244,6 @@ def test_write_raster_window():
             assert src.transform == out_profile["transform"]
     finally:
         shutil.rmtree(path, ignore_errors=True)
-
-
-def test_write_raster_window_memory():
-    """Basic output format writing."""
-    path = "memoryfile"
-    # standard tile
-    tp = BufferedTilePyramid("geodetic")
-    tile = tp.tile(5, 5, 5)
-    data = ma.masked_array(np.ones((2,) + tile.shape))
-    for out_profile in [
-        dict(
-            driver="GTiff",
-            count=2,
-            dtype="uint8",
-            compress="lzw",
-            nodata=0,
-            height=tile.height,
-            width=tile.width,
-            affine=tile.affine,
-        ),
-        dict(
-            driver="GTiff",
-            count=2,
-            dtype="uint8",
-            compress="deflate",
-            nodata=0,
-            height=tile.height,
-            width=tile.width,
-            affine=tile.affine,
-        ),
-        dict(
-            driver="PNG",
-            count=2,
-            dtype="uint8",
-            nodata=0,
-            height=tile.height,
-            width=tile.width,
-            compress=None,
-            affine=tile.affine,
-        ),
-    ]:
-        with pytest.raises(DeprecationWarning):
-            write_raster_window(
-                in_tile=tile, in_data=data, out_profile=out_profile, out_path=path
-            )
 
 
 def test_raster_window_memoryfile():
@@ -345,51 +305,51 @@ def test_write_raster_window_errors():
     # in_tile
     with pytest.raises(TypeError):
         write_raster_window(
-            in_tile="invalid tile",
+            in_grid="invalid tile",
             in_data=data,
             out_profile=profile,
-            out_tile=tile,
+            out_grid=tile,
             out_path=path,
         )
     # out_tile
     with pytest.raises(TypeError):
         write_raster_window(
-            in_tile=tile,
+            in_grid=tile,
             in_data=data,
             out_profile=profile,
-            out_tile="invalid tile",
+            out_grid="invalid tile",
             out_path=path,
         )
     # in_data
     with pytest.raises(TypeError):
         write_raster_window(
-            in_tile=tile,
+            in_grid=tile,
             in_data="invalid data",
             out_profile=profile,
-            out_tile=tile,
+            out_grid=tile,
             out_path=path,
         )
     # out_profile
     with pytest.raises(TypeError):
         write_raster_window(
-            in_tile=tile,
+            in_grid=tile,
             in_data=data,
             out_profile="invalid profile",
-            out_tile=tile,
+            out_grid=tile,
             out_path=path,
         )
     # out_path
     with pytest.raises(TypeError):
         write_raster_window(
-            in_tile=tile, in_data=data, out_profile=profile, out_tile=tile, out_path=999
+            in_grid=tile, in_data=data, out_profile=profile, out_grid=tile, out_path=999
         )
     # cannot write
     with pytest.raises(ValueError):
         write_raster_window(
-            in_tile=tile,
+            in_grid=tile,
             in_data=data,
             out_profile=profile,
-            out_tile=tile,
+            out_grid=tile,
             out_path="/invalid_path",
         )
 
@@ -402,14 +362,14 @@ def test_extract_from_array():
     # intersecting at top
     out_tile = BufferedTilePyramid("geodetic").tile(5, 20, 20)
     out_array = extract_from_array(
-        in_raster=data, in_affine=in_tile.affine, out_tile=out_tile
+        array=data, in_affine=in_tile.affine, out_tile=out_tile
     )
     assert isinstance(out_array, np.ndarray)
     assert np.all(np.where(out_array == 1, True, False))
     # intersecting at bottom
     out_tile = BufferedTilePyramid("geodetic").tile(5, 22, 20)
     out_array = extract_from_array(
-        in_raster=data, in_affine=in_tile.affine, out_tile=out_tile
+        array=data, in_affine=in_tile.affine, out_tile=out_tile
     )
     assert isinstance(out_array, np.ndarray)
     assert np.all(np.where(out_array == 2, True, False))
@@ -417,7 +377,7 @@ def test_extract_from_array():
     out_tile = BufferedTilePyramid("geodetic").tile(5, 15, 20)
     with pytest.raises(ValueError):
         out_array = extract_from_array(
-            in_raster=data, in_affine=in_tile.affine, out_tile=out_tile
+            array=data, in_affine=in_tile.affine, out_tile=out_tile
         )
 
 
@@ -738,6 +698,7 @@ def test_convert_raster_copy(cleantopo_br_tif, mp_tmpdir):
         assert not src.read(masked=True).mask.all()
 
 
+@pytest.mark.integration
 def test_convert_raster_copy_s3(cleantopo_br_tif_s3, mp_s3_tmpdir):
     out = mp_s3_tmpdir / "copied.tif"
 
@@ -770,6 +731,7 @@ def test_convert_raster_overwrite(cleantopo_br_tif, mp_tmpdir):
         assert not src.read(masked=True).mask.all()
 
 
+@pytest.mark.integration
 def test_convert_raster_overwrite_s3(cleantopo_br_tif_s3, mp_s3_tmpdir):
     out = mp_s3_tmpdir / "copied.tif"
 
@@ -795,6 +757,7 @@ def test_convert_raster_other_format_copy(cleantopo_br_tif, mp_tmpdir):
         convert_raster(cleantopo_br_tif, out, exists_ok=False)
 
 
+@pytest.mark.integration
 def test_convert_raster_other_format_copy_s3(cleantopo_br_tif_s3, mp_s3_tmpdir):
     out = mp_s3_tmpdir / "copied.jp2"
 
@@ -820,6 +783,7 @@ def test_convert_raster_other_format_overwrite(cleantopo_br_tif, mp_tmpdir):
         assert not src.read(masked=True).mask.all()
 
 
+@pytest.mark.integration
 def test_convert_raster_other_format_overwrite_s3(cleantopo_br_tif_s3, mp_s3_tmpdir):
     out = mp_s3_tmpdir / "copied.jp2"
 
@@ -849,6 +813,49 @@ def test_referencedraster_meta(s2_band):
         assert k in meta
 
 
+@pytest.mark.parametrize("masked", [True, False])
+@pytest.mark.parametrize("grid", [lazy_fixture("s2_band_tile")])
+def test_referencedraster_from_file(s2_band, masked, grid):
+    rr = ReferencedRaster.from_file(s2_band, grid=grid, masked=masked)
+    if masked:
+        assert isinstance(rr.array, ma.MaskedArray)
+    else:
+        assert not isinstance(rr.array, ma.MaskedArray)
+        assert isinstance(rr.array, np.ndarray)
+    if grid:
+        assert rr.array.shape[1:] == grid.shape
+
+
+def test_referencedraster_from_array_like(s2_band):
+    rr = ReferencedRaster.from_file(s2_band)
+    assert ReferencedRaster.from_array_like(rr)
+    assert ReferencedRaster.from_array_like(rr.data, transform=rr.transform, crs=rr.crs)
+
+
+def test_referencedraster_from_array_like_errors(s2_band):
+    with pytest.raises(TypeError):
+        ReferencedRaster.from_array_like("foo")
+
+    rr = ReferencedRaster.from_file(s2_band)
+    with pytest.raises(ValueError):
+        ReferencedRaster.from_array_like(rr.data)
+    with pytest.raises(ValueError):
+        ReferencedRaster.from_array_like(rr.data, transform=rr.transform)
+    with pytest.raises(ValueError):
+        ReferencedRaster.from_array_like(rr.data, crs=rr.crs)
+
+
+def test_referencedraster_array_interface(s2_band):
+    rr = ReferencedRaster.from_file(s2_band)
+    assert isinstance(ma.array(rr), ma.MaskedArray)
+
+
+@pytest.mark.parametrize("indexes", [None, 1, [1]])
+def test_referencedraster_get_band_indexes(s2_band, indexes):
+    rr = ReferencedRaster.from_file(s2_band)
+    assert rr.get_band_indexes(indexes) == [1]
+
+
 @pytest.mark.parametrize("indexes", [None, 1, [1]])
 def test_referencedraster_read_band(s2_band, indexes):
     rr = ReferencedRaster.from_file(s2_band)
@@ -858,7 +865,7 @@ def test_referencedraster_read_band(s2_band, indexes):
 @pytest.mark.parametrize("indexes", [None, 1, [1]])
 def test_referencedraster_read_tile_band(s2_band, indexes, s2_band_tile):
     rr = ReferencedRaster.from_file(s2_band)
-    assert rr.read(indexes, tile=s2_band_tile).any()
+    assert rr.read(indexes, grid=s2_band_tile).any()
 
 
 @pytest.mark.parametrize("dims", [2, 3])
@@ -872,9 +879,7 @@ def test_referencedraster_to_file(s2_band, mp_tmpdir, dims):
         assert src.read(masked=True).any()
 
 
-@pytest.mark.parametrize(
-    "path", [pytest.lazy_fixture("mp_s3_tmpdir"), pytest.lazy_fixture("mp_tmpdir")]
-)
+@pytest.mark.parametrize("path", [lazy_fixture("mp_tmpdir")])
 @pytest.mark.parametrize("dtype", [np.uint8, np.float32])
 @pytest.mark.parametrize("in_memory", [True, False])
 def test_rasterio_write(path, dtype, in_memory):
@@ -898,6 +903,15 @@ def test_rasterio_write(path, dtype, in_memory):
         assert np.array_equal(arr, written)
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize("path", [lazy_fixture("mp_s3_tmpdir")])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32])
+@pytest.mark.parametrize("in_memory", [True, False])
+def test_rasterio_write_remote(path, dtype, in_memory):
+    test_rasterio_write(path, dtype, in_memory)
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("in_memory", [True, False])
 def test_rasterio_write_remote_exception(mp_s3_tmpdir, in_memory):
     path = mp_s3_tmpdir / "temp.tif"
@@ -916,11 +930,12 @@ def test_rasterio_write_remote_exception(mp_s3_tmpdir, in_memory):
             raise ValueError()
 
 
+@pytest.mark.integration
 def test_output_s3_single_gtiff_error(output_s3_single_gtiff_error):
     # the process file will raise an exception on purpose
     with pytest.raises(AssertionError):
         with output_s3_single_gtiff_error.mp() as mp:
-            mp.execute(output_s3_single_gtiff_error.first_process_tile())
+            mp.execute_tile(output_s3_single_gtiff_error.first_process_tile())
     # make sure no output has been written
     assert not path_exists(mp.config.output.path)
 
@@ -928,11 +943,7 @@ def test_output_s3_single_gtiff_error(output_s3_single_gtiff_error):
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.lazy_fixture("raster_4band"),
-        pytest.lazy_fixture("raster_4band_s3"),
-        pytest.lazy_fixture("raster_4band_aws_s3"),
-        pytest.lazy_fixture("raster_4band_http"),
-        pytest.lazy_fixture("raster_4band_secure_http"),
+        lazy_fixture("raster_4band"),
     ],
 )
 def test_read_raster_no_crs(path):
@@ -941,14 +952,35 @@ def test_read_raster_no_crs(path):
     assert not arr.mask.all()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.lazy_fixture("raster_4band"),
-        pytest.lazy_fixture("raster_4band_s3"),
-        pytest.lazy_fixture("raster_4band_aws_s3"),
-        pytest.lazy_fixture("raster_4band_http"),
-        pytest.lazy_fixture("raster_4band_secure_http"),
+        lazy_fixture("raster_4band_s3"),
+        lazy_fixture("raster_4band_aws_s3"),
+        lazy_fixture("raster_4band_http"),
+        lazy_fixture("raster_4band_secure_http"),
+    ],
+)
+def test_read_raster_no_crs_remote(path):
+    test_read_raster_no_crs(path)
+
+
+@pytest.mark.aws_s3
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band_aws_s3"),
+    ],
+)
+def test_read_raster_no_crs_aws_s3(path):
+    test_read_raster_no_crs(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band"),
     ],
 )
 @pytest.mark.parametrize("grid", ["geodetic", "mercator"])
@@ -991,20 +1023,44 @@ def test_read_raster_window(path, grid, pixelbuffer, zoom):
                 assert not band.mask.all()
 
 
+@pytest.mark.integration
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.lazy_fixture("raster_4band"),
-        pytest.lazy_fixture("raster_4band_s3"),
-        pytest.lazy_fixture("raster_4band_aws_s3"),
-        pytest.lazy_fixture("raster_4band_http"),
-        pytest.lazy_fixture("raster_4band_secure_http"),
-        pytest.lazy_fixture("stacta"),
-        # this test is deactivated because it fails
-        # pytest.lazy_fixture("s3_stacta"),
-        pytest.lazy_fixture("aws_s3_stacta"),
-        pytest.lazy_fixture("http_stacta"),
-        pytest.lazy_fixture("secure_http_stacta"),
+        lazy_fixture("raster_4band_s3"),
+        lazy_fixture("raster_4band_http"),
+        lazy_fixture("raster_4band_secure_http"),
+    ],
+)
+@pytest.mark.parametrize("grid", ["geodetic", "mercator"])
+@pytest.mark.parametrize("pixelbuffer", [0, 10, 500])
+@pytest.mark.parametrize("zoom", [8, 5])
+def test_read_raster_window_remote(path, grid, pixelbuffer, zoom):
+    test_read_raster_window(path, grid, pixelbuffer, zoom)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band_aws_s3"),
+    ],
+)
+@pytest.mark.parametrize("grid", ["geodetic", "mercator"])
+@pytest.mark.parametrize("pixelbuffer", [0, 10, 500])
+@pytest.mark.parametrize("zoom", [8, 5])
+def test_read_raster_window_aws_s3(path, grid, pixelbuffer, zoom):
+    test_read_raster_window(path, grid, pixelbuffer, zoom)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band_s3"),
+        lazy_fixture("raster_4band_http"),
+        lazy_fixture("raster_4band_secure_http"),
+        lazy_fixture("raster_4band"),
+        lazy_fixture("stacta"),
     ],
 )
 def test_read_raster(path):
@@ -1013,25 +1069,121 @@ def test_read_raster(path):
     assert not rr.data.mask.all()
 
 
+@pytest.mark.parametrize("masked", [True, False])
+@pytest.mark.parametrize("grid", [lazy_fixture("s2_band_tile")])
+def test_read_raster_args(s2_band, masked, grid):
+    rr = read_raster(s2_band, grid=grid, masked=masked)
+    if masked:
+        assert isinstance(rr.array, ma.MaskedArray)
+    else:
+        assert not isinstance(rr.array, ma.MaskedArray)
+        assert isinstance(rr.array, np.ndarray)
+    if grid:
+        assert rr.array.shape[1:] == grid.shape
+
+
+@pytest.mark.aws_s3
 @pytest.mark.parametrize(
     "path",
     [
-        pytest.lazy_fixture("raster_4band"),
-        pytest.lazy_fixture("raster_4band_s3"),
-        pytest.lazy_fixture("raster_4band_aws_s3"),
-        pytest.lazy_fixture("raster_4band_http"),
-        pytest.lazy_fixture("raster_4band_secure_http"),
-        pytest.lazy_fixture("stacta"),
-        # this test is deactivated because it fails
-        # pytest.lazy_fixture("s3_stacta"),
-        pytest.lazy_fixture("aws_s3_stacta"),
-        pytest.lazy_fixture("http_stacta"),
-        pytest.lazy_fixture("secure_http_stacta"),
+        lazy_fixture("raster_4band_aws_s3"),
+        lazy_fixture("aws_s3_stacta"),
+    ],
+)
+def test_read_raster_remote(path):
+    test_read_raster(path)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band_http"),
+        lazy_fixture("raster_4band_s3"),
+        lazy_fixture("http_stacta"),
+        lazy_fixture("secure_http_stacta"),
+    ],
+)
+def test_read_raster_integration(path):
+    test_read_raster(path)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band"),
+        lazy_fixture("stacta"),
     ],
 )
 def test_read_raster_tile(path):
     tp = BufferedTilePyramid("geodetic")
     tile = next(tp.tiles_from_bounds(read_raster(path).bounds, zoom=13))
-    rr = read_raster(path, tile=tile)
+    rr = read_raster(path, grid=tile)
     assert isinstance(rr, ReferencedRaster)
     assert not rr.data.mask.all()
+
+
+@pytest.mark.aws_s3
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band_aws_s3"),
+        lazy_fixture("aws_s3_stacta"),
+    ],
+)
+def test_read_raster_tile_remote(path):
+    test_read_raster_tile(path)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "path",
+    [
+        lazy_fixture("raster_4band_s3"),
+        lazy_fixture("raster_4band_http"),
+        lazy_fixture("raster_4band_secure_http"),
+        lazy_fixture("http_stacta"),
+        lazy_fixture("secure_http_stacta"),
+    ],
+)
+def test_read_raster_tile_integration(path):
+    test_read_raster_tile(path)
+
+
+def test_clip_array_with_vector(s2_band, s2_band_tile):
+    rr = ReferencedRaster.from_file(s2_band)
+
+    geometries = [dict(geometry=s2_band_tile.bbox)]
+    out = clip_array_with_vector(rr.data, rr.affine, geometries)
+    assert out.mask.all()
+
+
+def test_clip_array_with_vector_geometrycollection(s2_band, s2_band_tile):
+    rr = ReferencedRaster.from_file(s2_band)
+
+    geometries = [dict(geometry=GeometryCollection([s2_band_tile.bbox]))]
+    out = clip_array_with_vector(rr.data, rr.affine, geometries)
+    assert out.mask.all()
+
+
+def test_clip_array_with_vector_2dim(s2_band, s2_band_tile):
+    rr = ReferencedRaster.from_file(s2_band)
+
+    geometries = [dict(geometry=s2_band_tile.bbox)]
+    out = clip_array_with_vector(rr.data[0], rr.affine, geometries)
+    assert out.mask.all()
+
+
+@pytest.mark.parametrize("inverted", [True, False])
+@pytest.mark.parametrize("clip_buffer", [0, 0.1])
+def test_clip_array_with_vector_empty_geometries(s2_band, inverted, clip_buffer):
+    rr = ReferencedRaster.from_file(s2_band)
+
+    geometries = [dict(geometry=GeometryCollection())]
+    out = clip_array_with_vector(
+        rr.data, rr.affine, geometries, inverted=inverted, clip_buffer=clip_buffer
+    )
+    if inverted:
+        assert not out.mask.all()
+    else:
+        assert out.mask.all()

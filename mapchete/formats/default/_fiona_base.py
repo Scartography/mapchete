@@ -5,13 +5,12 @@ Baseclasses for all drivers using fiona for reading and writing data.
 import logging
 import types
 
-from fiona.errors import DriverError
-
-from mapchete.config import validate_values
 from mapchete.formats import base
+from mapchete.formats.protocols import VectorInput
 from mapchete.io import MPath, fiona_open
 from mapchete.io.vector import write_vector_window
 from mapchete.tile import BufferedTile
+from mapchete.validate import validate_values
 
 logger = logging.getLogger(__name__)
 
@@ -57,19 +56,10 @@ class OutputDataReader(base.TileDirectoryOutputReader):
         process output : list
         """
         try:
-            path = self.get_path(output_tile)
-            with fiona_open(path, "r") as src:
+            with fiona_open(self.get_path(output_tile), "r") as src:
                 return list(src)
-        except DriverError as e:
-            for i in (
-                "does not exist in the file system",
-                "No such file or directory",
-                "specified key does not exist.",
-            ):
-                if i in str(e):
-                    return self.empty(output_tile)
-            else:  # pragma: no cover
-                raise
+        except FileNotFoundError:
+            return self.empty(output_tile)
 
     def is_valid_with_config(self, config):
         """
@@ -179,7 +169,7 @@ class OutputDataWriter(base.TileDirectoryOutputWriter, OutputDataReader):
                 )
 
 
-class InputTile(base.InputTile):
+class InputTile(base.InputTile, VectorInput):
     """
     Target Tile representation of input data.
 
@@ -221,7 +211,7 @@ class InputTile(base.InputTile):
             raise NotImplementedError()
         return self._from_cache(validity_check=validity_check)
 
-    def is_empty(self, validity_check=True):
+    def is_empty(self, validity_check=True):  # pragma: no cover
         """
         Check if there is data within this tile.
 

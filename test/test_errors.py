@@ -8,8 +8,8 @@ import pytest
 
 import mapchete
 from mapchete import errors
-from mapchete._processing import Executor
 from mapchete.config import MapcheteConfig, validate_values
+from mapchete.executor import Executor
 from mapchete.tile import BufferedTilePyramid
 
 
@@ -31,11 +31,11 @@ def test_execute(example_mapchete):
     # in readonly mode
     with mapchete.open(example_mapchete.dict, mode="readonly") as mp:
         with pytest.raises(AttributeError):
-            mp.execute(next(mp.get_process_tiles()))
+            mp.execute_tile(next(mp.get_process_tiles()))
     # wrong tile type
     with mapchete.open(example_mapchete.dict) as mp:
         with pytest.raises(TypeError):
-            mp.execute("invalid")
+            mp.execute_tile("invalid")
 
 
 def test_read(example_mapchete):
@@ -278,7 +278,7 @@ def test_process_exception(mp_tmpdir, cleantopo_br, process_error_py):
     config.update(process=process_error_py)
     with mapchete.open(config) as mp:
         with pytest.raises(AssertionError):
-            mp.execute((5, 0, 0))
+            mp.execute_tile((5, 0, 0))
 
 
 def test_output_error(mp_tmpdir, cleantopo_br, output_error_py):
@@ -287,7 +287,7 @@ def test_output_error(mp_tmpdir, cleantopo_br, output_error_py):
     config.update(process=output_error_py)
     with mapchete.open(config) as mp:
         with pytest.raises(errors.MapcheteProcessOutputError):
-            mp.execute((5, 0, 0))
+            mp.execute_tile((5, 0, 0))
 
 
 def _raise_error(i):
@@ -297,11 +297,8 @@ def _raise_error(i):
 
 def test_finished_task():
     """Encapsulating exceptions test."""
-    task = next(Executor().as_completed(func=_raise_error, iterable=[0]))
-    assert task.exception()
-    with pytest.raises(ZeroDivisionError):
-        task.result()
-    assert "FakeFuture" in str(task)
+    with pytest.raises(errors.MapcheteTaskFailed):
+        next(Executor().as_completed(func=_raise_error, iterable=[0]))
 
 
 def test_strip_zoom_error(files_zooms):

@@ -5,14 +5,12 @@ import json
 
 import pytest
 from rasterio.crs import CRS
-from tilematrix import TilePyramid
 
 import mapchete
 from mapchete import errors
 from mapchete.formats import (
     available_input_formats,
     available_output_formats,
-    base,
     driver_from_extension,
     driver_from_file,
     dump_metadata,
@@ -105,48 +103,7 @@ def test_mapchete_input(mapchete_input):
         assert not mp_input.is_empty()
 
 
-def test_base_format_classes():
-    """Base format classes."""
-    # InputData
-    tp = TilePyramid("geodetic")
-    tmp = base.InputData(dict(pyramid=tp, pixelbuffer=0))
-    assert tmp.pyramid
-    assert tmp.pixelbuffer == 0
-    assert tmp.crs
-    with pytest.raises(NotImplementedError):
-        tmp.open(None)
-    with pytest.raises(NotImplementedError):
-        tmp.bbox()
-    with pytest.raises(NotImplementedError):
-        tmp.exists()
-
-    # InputTile
-    tmp = base.InputTile(None)
-    with pytest.raises(NotImplementedError):
-        tmp.read()
-    with pytest.raises(NotImplementedError):
-        tmp.is_empty()
-
-    # OutputDataWriter
-    tmp = base.OutputDataWriter(dict(pixelbuffer=0, grid="geodetic", metatiling=1))
-    assert tmp.pyramid
-    assert tmp.pixelbuffer == 0
-    assert tmp.crs
-    with pytest.raises(NotImplementedError):
-        tmp.read(None)
-    with pytest.raises(NotImplementedError):
-        tmp.write(None, None)
-    with pytest.raises(NotImplementedError):
-        tmp.is_valid_with_config(None)
-    with pytest.raises(NotImplementedError):
-        tmp.for_web(None)
-    with pytest.raises(NotImplementedError):
-        tmp.empty(None)
-    with pytest.raises(NotImplementedError):
-        tmp.open(None, None)
-
-
-@pytest.mark.remote
+@pytest.mark.integration
 def test_http_rasters(files_bounds, http_raster):
     """Raster file on remote server with http:// or https:// URLs."""
     zoom = 13
@@ -253,7 +210,7 @@ def test_load_metadata_datetime_list(driver_output_params_dict):
 
 def test_tile_path_schema(tile_path_schema):
     mp = tile_path_schema.mp()
-    mp.batch_process()
+    list(mp.execute())
     tile = tile_path_schema.first_process_tile()
     control = [str(tile.zoom), str(tile.col), str(tile.row) + ".tif"]
     assert mp.config.output_reader.get_path(tile).elements[-3:] == control
@@ -261,7 +218,7 @@ def test_tile_path_schema(tile_path_schema):
 
 def test_tile_path_schema_metadata_json(tile_path_schema):
     mp = tile_path_schema.mp()
-    mp.batch_process()
+    list(mp.execute())
     tile = tile_path_schema.first_process_tile()
     output_metadata = read_output_metadata(
         mp.config.output_reader.path / "metadata.json"
@@ -278,7 +235,7 @@ def test_tile_path_schema_metadata_json(tile_path_schema):
 
 def test_tile_path_schema_stac_json(tile_path_schema):
     mp = tile_path_schema.mp()
-    mp.batch_process()
+    list(mp.execute())
     mp.write_stac()
     stac_json = json.loads((mp.config.output_reader.path / "out.json").read_text())
     template = stac_json.get("asset_templates")["bands"]["href"]

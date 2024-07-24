@@ -10,7 +10,8 @@ from mapchete.config import MULTIPROCESSING_DEFAULT_START_METHOD
 from mapchete.formats import available_output_formats
 from mapchete.io import MPath
 from mapchete.log import set_log_level, setup_logfile
-from mapchete.validate import validate_bounds, validate_crs, validate_zooms
+from mapchete.types import Bounds, ZoomLevels
+from mapchete.validate import validate_crs
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +30,14 @@ def _validate_zoom(ctx, param, zoom):
         try:
             if len(zoom_levels) > 2:
                 raise ValueError("zooms can be maximum two items")
-            return validate_zooms(zoom_levels, expand=False)
-        except Exception as e:
-            raise click.BadParameter(e)
+            return ZoomLevels.from_inp(zoom_levels)
+        except Exception as exc:
+            raise click.BadParameter(str(exc))
 
 
 def _validate_bounds(ctx, param, bounds):
-    return validate_bounds(bounds) if bounds else None
+    if bounds:
+        return Bounds.from_inp(bounds)
 
 
 def _validate_crs(ctx, param, crs):
@@ -79,7 +81,7 @@ def _cb_key_val(ctx, param, value):
     else:
         out = {}
         for pair in value:
-            if "=" not in pair:
+            if "=" not in pair:  # pragma: no cover
                 raise click.BadParameter(
                     "Invalid syntax for KEY=VAL arg: {}".format(pair)
                 )
@@ -128,6 +130,8 @@ arg_output = click.argument("output", type=click.STRING)
 arg_src_tiledir = click.argument("src_tiledir", type=click.STRING)
 arg_dst_tiledir = click.argument("dst_tiledir", type=click.STRING)
 arg_tiledir = click.argument("tiledir", type=click.STRING)
+arg_path = click.argument("path", type=click.Path(path_type=MPath))
+arg_out_path = click.argument("out_path", type=click.Path(path_type=MPath))
 
 
 # click options #
@@ -200,13 +204,7 @@ opt_tile = click.option(
     "--tile", "-t", type=click.INT, nargs=3, help="Zoom, row, column of single tile."
 )
 opt_overwrite = click.option(
-    "--overwrite", "-o", is_flag=True, help="Overwrite if tile(s) already exist(s)."
-)
-opt_multi = click.option(
-    "--multi",
-    "-m",
-    type=click.INT,
-    help="Number of workers when processing concurrently.",
+    "--overwrite", "-o", is_flag=True, help="Overwrite if output already exist(s)."
 )
 opt_workers = click.option(
     "--workers",
@@ -253,6 +251,7 @@ opt_output_formats = click.option(
 opt_geojson = click.option("--geojson", is_flag=True, help="Write GeoJSON index.")
 opt_gpkg = click.option("--gpkg", is_flag=True, help="Write GeoPackage index.")
 opt_shp = click.option("--shp", is_flag=True, help="Write Shapefile index.")
+opt_fgb = click.option("--fgb", is_flag=True, help="Write FlatGeobuf index.")
 opt_vrt = click.option("--vrt", is_flag=True, help="Write VRT file.")
 opt_txt = click.option(
     "--txt", is_flag=True, help="Write output tile paths to text file."
@@ -359,4 +358,9 @@ opt_dask_no_task_graph = click.option(
     "--dask-no-task-graph",
     is_flag=True,
     help="Don't compute task graph when using dask.",
+)
+opt_profiling = click.option(
+    "--profiling",
+    is_flag=True,
+    help="Add profiling information to executed tasks.",
 )

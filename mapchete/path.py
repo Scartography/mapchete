@@ -1,22 +1,30 @@
 """Functions handling paths and file systems."""
+
 from __future__ import annotations
 
+import json
 import logging
 import os
+import warnings
 from collections import defaultdict
+from datetime import datetime
 from functools import cached_property
-from typing import IO, List, Set, TextIO, Union
+from io import TextIOWrapper
+from typing import IO, Generator, List, Optional, Set, TextIO, Tuple, Union
 
 import fiona
 import fsspec
+import oyaml as yaml
 import rasterio
 from fiona.session import Session as FioSession
-from fsspec import AbstractFileSystem
+from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from rasterio.session import Session as RioSession
+from retry import retry
 
-from mapchete._executor import Executor
-from mapchete.io.settings import GDAL_HTTP_OPTS
+from mapchete.executor import Executor
+from mapchete.settings import GDALHTTPOptions, IORetrySettings, mapchete_options
 from mapchete.tile import BufferedTile
+from mapchete.types import MPathLike
 
 logger = logging.getLogger(__name__)
 
@@ -24,19 +32,21 @@ DEFAULT_STORAGE_OPTIONS = {"asynchronous": False, "timeout": None}
 UNALLOWED_S3_KWARGS = ["timeout"]
 UNALLOWED_HTTP_KWARGS = ["username", "password"]
 
-MPathLike = Union[str, os.PathLike]
-
 
 class MPath(os.PathLike):
     """
     Partially replicates pathlib.Path but with remote file support.
     """
 
+    _storage_options: dict
+    _gdal_options: dict
+
     def __init__(
         self,
         path: Union[str, os.PathLike, MPath],
-        fs: AbstractFileSystem = None,
+        fs: Optional[AbstractFileSystem] = None,
         storage_options: Union[dict, None] = None,
+        _info: Union[dict, None] = None,
         **kwargs,
     ):
         self._kwargs = {}
@@ -67,6 +77,8 @@ class MPath(os.PathLike):
         self._storage_options = dict(
             DEFAULT_STORAGE_OPTIONS, **self._kwargs.get("storage_options") or {}
         )
+        self._info = _info
+        self._gdal_options = dict()
 
     @staticmethod
     def from_dict(dictionary: dict) -> MPath:
@@ -95,6 +107,11 @@ class MPath(os.PathLike):
             return MPath(inp.__fspath__(), **kwargs)
         else:  # pragma: no cover
             raise TypeError(f"cannot construct MPath object from {inp}")
+
+    def info(self, refresh: bool = False) -> dict:
+        if refresh or self._info is None:
+            self._info = self.fs.info(self._path_str)
+        return self._info
 
     def to_dict(self) -> dict:
         return dict(
@@ -138,7 +155,7 @@ class MPath(os.PathLike):
         """Return path filesystem."""
         if self._fs is not None:
             return self._fs
-        elif self._path_str.startswith("s3"):
+        elif self._path_str.startswith("s3://"):
             return fsspec.filesystem(
                 "s3",
                 requester_pays=self._storage_options.get(
@@ -155,14 +172,13 @@ class MPath(os.PathLike):
                 },
             )
         elif self._path_str.startswith(("http://", "https://")):
-            if self._storage_options.get("username") or self._storage_options.get(
-                "password"
-            ):  # pragma: no cover
+            username = self._storage_options.get("username")
+            if username:
                 from aiohttp import BasicAuth
 
                 auth = BasicAuth(
-                    self._storage_options.get("username"),
-                    self._storage_options.get("password"),
+                    login=username,
+                    password=self._storage_options.get("password", ""),
                 )
             else:
                 auth = None
@@ -180,7 +196,7 @@ class MPath(os.PathLike):
 
     def fs_session(self):
         if hasattr(self.fs, "session"):
-            return self.fs.session
+            return getattr(self.fs, "session")
         else:
             return None
 
@@ -289,48 +305,132 @@ class MPath(os.PathLike):
         else:
             return self.new(os.path.relpath(self._path_str, start=start))
 
-    def open(self, mode: str = "r") -> Union[IO, TextIO]:
+    def relative_to(self, other: MPathLike) -> str:
+        return str(
+            self.without_protocol().relative_path(
+                MPath.from_inp(other).without_protocol()
+            )
+        )
+
+    def open(
+        self, mode: str = "r"
+    ) -> Union[IO, TextIO, TextIOWrapper, AbstractBufferedFile]:
         """Open file."""
         return self.fs.open(self._path_str, mode)
 
+    @retry(logger=logger, **dict(IORetrySettings()))
     def read_text(self) -> str:
         """Open and return file content as text."""
-        with self.open() as src:
-            return src.read()
+        try:
+            with self.open() as src:
+                return str(src.read())
+        except FileNotFoundError:
+            raise FileNotFoundError(f"{str(self)} not found")
+        except Exception as e:  # pragma: no cover
+            if self.exists():
+                logger.exception(e)
+                raise e
+            else:
+                raise FileNotFoundError(f"{str(self)} not found")
+
+    def read_json(self) -> dict:
+        """Read local or remote."""
+        return json.loads(self.read_text())
+
+    def write_json(self, params: dict, sort_keys=True, indent=4) -> None:
+        """Write local or remote."""
+        logger.debug(f"write {params} to {self}")
+        self.parent.makedirs()
+        with self.open(mode="w") as dst:
+            json.dump(params, dst, sort_keys=sort_keys, indent=indent)
+
+    def read_yaml(self) -> dict:
+        """Read local or remote."""
+        return yaml.safe_load(self.read_text())
+
+    def write_yaml(self, params: dict) -> None:
+        """Write local or remote."""
+        logger.debug(f"write {params} to {self}")
+        self.parent.makedirs()
+        with self.open(mode="w") as dst:
+            yaml.dump(params, dst)
 
     def makedirs(self, exist_ok: bool = True) -> None:
         """Create all parent directories for path."""
         # create parent directories on local filesystems
-        if self.fs.protocol == "file":
+        if "file" in self.fs.protocol:
             # if path has no suffix, assume a file path and only create parent directories
             logger.debug("create directory %s", str(self))
             self.fs.makedirs(self, exist_ok=exist_ok)
 
-    def ls(
-        self, detail: bool = False, absolute_paths: bool = True
-    ) -> List[Union[MPath, dict]]:
-        def _create_full_path(path):
+    def _create_full_path(self, path: str, absolute_path: bool = True):
+        if "s3" in self.protocols:
             # s3fs returns paths without protocol ("s3://"), therefore we have to append it again:
-            if absolute_paths and "s3" in self.protocols:
-                return self.new(path).with_protocol("s3")
+            return self.new(path).with_protocol("s3")
+        elif absolute_path:
             return self.new(path)
+        return self.new(os.path.relpath(path, start=self))
 
+    def ls(
+        self,
+        detail: bool = False,
+        absolute_paths: bool = True,
+    ) -> List[Union[MPath, dict]]:
         if detail:
             # return as is but convert "name" from string to MPath instead
             return [
                 {
-                    k: (_create_full_path(v) if k == "name" else v)
+                    k: (
+                        self._create_full_path(v, absolute_path=absolute_paths)
+                        if k == "name"
+                        else v
+                    )
                     for k, v in path_info.items()
                 }
                 for path_info in self.fs.ls(self._path_str, detail=detail)
             ]
         else:
             return [
-                _create_full_path(path)
+                self._create_full_path(path, absolute_path=absolute_paths)
                 for path in self.fs.ls(self._path_str, detail=detail)
             ]
 
+    def walk(
+        self,
+        maxdepth: Optional[int] = None,
+        topdown: bool = True,
+        absolute_paths: bool = True,
+        **kwargs,
+    ) -> Generator[
+        Tuple[Union[MPath, dict], List[Union[MPath, dict]], List[Union[MPath, dict]]],
+        None,
+        None,
+    ]:
+        for root, subpaths, files in self.fs.walk(
+            str(self), maxdepth=maxdepth, topdown=topdown, **kwargs
+        ):
+            if isinstance(root, str):
+                yield (
+                    self._create_full_path(root, absolute_path=absolute_paths),
+                    [
+                        self._create_full_path(
+                            MPath(root) / subpath, absolute_path=absolute_paths
+                        )
+                        for subpath in subpaths
+                    ],
+                    [
+                        self._create_full_path(
+                            MPath(root) / file, absolute_path=absolute_paths
+                        )
+                        for file in files
+                    ],
+                )
+
     def rm(self, recursive: bool = False, ignore_errors: bool = False) -> None:
+        if (
+            not recursive and not ignore_errors and self.is_directory()
+        ):  # pragma: no cover
+            warnings.warn(f"{self} is a directory, use 'recursive' flag to delete")
         try:
             self.fs.rm(str(self), recursive=recursive)
         except FileNotFoundError:
@@ -340,9 +440,28 @@ class MPath(os.PathLike):
                 raise
 
     def size(self) -> int:
-        return self.fs.size(self._path_str)
+        return self.info().get("size", self.info().get("Size"))
 
-    def joinpath(self, *other: List[MPathLike]) -> MPath:
+    def last_modified(self) -> datetime:
+        # for S3 objects
+        last_modified = self.info().get("LastModified")
+        mtime = self.info().get("mtime")
+        if last_modified:
+            return last_modified
+        # for local files
+        elif mtime:
+            return datetime.fromtimestamp(mtime)
+        else:  # pragma: no cover
+            raise ValueError("Object timestamp could not be determined.")
+
+    def is_directory(self) -> bool:
+        # for S3 objects use the possible cached info directory
+        if "StorageClass" in self.info():  # pragma: no cover
+            return self.info().get("StorageClass") == "DIRECTORY"
+        else:
+            return self.fs.isdir(self._path_str)
+
+    def joinpath(self, *other: Union[MPathLike, List[MPathLike]]) -> MPath:
         """Join path with other."""
         return self.new(os.path.join(self._path_str, *list(map(str, other))))
 
@@ -380,7 +499,7 @@ class MPath(os.PathLike):
 
         # for remote paths, we need some special settings
         if self.is_remote():
-            gdal_opts = GDAL_HTTP_OPTS.copy()
+            gdal_opts = dict(GDALHTTPOptions())
 
             # we cannot know at this point which file types the VRT or STACTA JSON
             # is pointing to, so in order to play safe, we remove the extensions constraint here
@@ -389,17 +508,16 @@ class MPath(os.PathLike):
                     gdal_opts.pop("CPL_VSIL_CURL_ALLOWED_EXTENSIONS")
                 except KeyError:  # pragma: no cover
                     pass
+                gdal_opts.update(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR")
 
             # limit requests only to allowed extensions
             else:
                 default_remote_extensions = gdal_opts.get(
                     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ""
                 ).split(", ")
-                if allowed_remote_extensions:
-                    extensions = allowed_remote_extensions.split(",") + (
-                        default_remote_extensions
-                    )
                 extensions = default_remote_extensions + [self.suffix]
+                if allowed_remote_extensions:
+                    extensions += allowed_remote_extensions
                 # make sure current path extension is added to allowed_remote_extensions
                 gdal_opts.update(
                     CPL_VSIL_CURL_ALLOWED_EXTENSIONS=", ".join(
@@ -408,14 +526,16 @@ class MPath(os.PathLike):
                 )
 
             # secure HTTP credentials
-            if self.fs.kwargs.get("auth"):
-                gdal_opts.update(
-                    GDAL_HTTP_USERPWD=f"{self.fs.kwargs['auth'].login}:{self.fs.kwargs['auth'].password}"
-                )
+            auth = getattr(self.fs, "kwargs", {}).get("auth")
+            if auth:
+                gdal_opts.update(GDAL_HTTP_USERPWD=f"{auth.login}:{auth.password}")
 
             # if a custom S3 endpoint is used, we need to deactivate these AWS options
             if self._endpoint_url:
-                gdal_opts.update(AWS_VIRTUAL_HOSTING=False, AWS_HTTPS=False)
+                gdal_opts.update(
+                    AWS_VIRTUAL_HOSTING=False,
+                    AWS_HTTPS=self._gdal_options.get("aws_https", False),
+                )
 
             # merge everything with user options
             gdal_opts.update(user_opts)
@@ -431,21 +551,25 @@ class MPath(os.PathLike):
     def _endpoint_url(self) -> Union[str, None]:
         # GDAL parses the paths in a weird way, so we have to be careful with a custom
         # endpoint
-        if hasattr(self.fs, "endpoint_url") and isinstance(self.fs.endpoint_url, str):
-            return self.fs.endpoint_url.lstrip("http://").lstrip("https://")
+        endpoint_url = getattr(self.fs, "endpoint_url", None)
+        if endpoint_url:
+            self._gdal_options.update(aws_https=endpoint_url.startswith("https://"))
+            return endpoint_url.replace("http://", "").replace("https://", "")
         else:
             return None
 
-    def rio_session(self) -> "rasterio.session.Session":
+    def rio_session(self) -> RioSession:
         if self.fs_session():
             # rasterio accepts a Session object but only a boto3.session.Session
             # object and not a aiobotocore.session.AioSession which we get from fsspec
             return RioSession.from_path(
                 self._path_str,
-                aws_access_key_id=self.fs.key,
-                aws_secret_access_key=self.fs.secret,
+                aws_access_key_id=getattr(self.fs, "key"),
+                aws_secret_access_key=getattr(self.fs, "secret"),
                 endpoint_url=self._endpoint_url,
-                requester_pays=self.fs.storage_options.get("requester_pays", False),
+                requester_pays=getattr(self.fs, "storage_options", {}).get(
+                    "requester_pays", False
+                ),
             )
         else:
             return RioSession.from_path(self._path_str)
@@ -476,16 +600,18 @@ class MPath(os.PathLike):
             )
         )
 
-    def fio_session(self) -> "fiona.session.Session":
+    def fio_session(self) -> FioSession:
         if self.fs_session():
             # fiona accepts a Session object but only a boto3.session.Session
             # object and not a aiobotocore.session.AioSession which we get from fsspec
             return FioSession.from_path(
                 self._path_str,
-                aws_access_key_id=self.fs.key,
-                aws_secret_access_key=self.fs.secret,
+                aws_access_key_id=getattr(self.fs, "key"),
+                aws_secret_access_key=getattr(self.fs, "secret"),
                 endpoint_url=self._endpoint_url,
-                requester_pays=self.fs.storage_options.get("requester_pays", False),
+                requester_pays=getattr(self.fs, "storage_options", {}).get(
+                    "requester_pays", False
+                ),
             )
         else:
             return FioSession.from_path(self._path_str)
@@ -522,7 +648,7 @@ class MPath(os.PathLike):
 
     def __add__(self, other: MPathLike) -> "MPath":
         """Short for self.joinpath()."""
-        return self.new(str(self) + other)
+        return self.new(str(self) + str(other))
 
     def __eq__(self, other: MPathLike):
         if isinstance(other, str):
@@ -582,7 +708,7 @@ def path_exists(
 
 
 def absolute_path(
-    path: Union[MPathLike, None] = None,
+    path: MPathLike,
     base_dir: Union[MPathLike, None] = None,
     **kwargs,
 ) -> MPath:
@@ -602,7 +728,7 @@ def absolute_path(
 
 
 def relative_path(
-    path: Union[MPathLike, None] = None,
+    path: MPathLike,
     base_dir: Union[MPathLike, None] = None,
     **kwargs,
 ) -> MPath:
@@ -635,11 +761,15 @@ def makedirs(
 
 
 def tiles_exist(
-    config=None,
-    output_tiles=None,
-    output_tiles_batches=None,
-    process_tiles=None,
-    process_tiles_batches=None,
+    config,
+    output_tiles: Optional[Generator[BufferedTile, None, None]] = None,
+    output_tiles_batches: Optional[
+        Generator[Generator[BufferedTile, None, None], None, None]
+    ] = None,
+    process_tiles: Optional[Generator[BufferedTile, None, None]] = None,
+    process_tiles_batches: Optional[
+        Generator[Generator[BufferedTile, None, None], None, None]
+    ] = None,
     **kwargs,
 ):
     """
@@ -691,10 +821,15 @@ def tiles_exist(
             )
 
         def _tiles():
-            if process_tiles or output_tiles:  # pragma: no cover
-                yield from process_tiles or output_tiles
-            else:
-                for batch in process_tiles_batches or output_tiles_batches:
+            if process_tiles:  # pragma: no cover
+                yield from process_tiles
+            elif output_tiles:  # pragma: no cover
+                yield from output_tiles
+            elif process_tiles_batches:
+                for batch in process_tiles_batches:
+                    yield from batch
+            elif output_tiles_batches:  # pragma: no cover
+                for batch in output_tiles_batches:
                     yield from batch
 
         for tile in _tiles():
@@ -712,40 +847,53 @@ def tiles_exist(
         logger.debug("sort output tiles by %s, this could take a while", sort_attribute)
         output_tiles_batches = _batch_tiles_by_attribute(output_tiles, sort_attribute)
 
+    if process_tiles_batches:
+        yield from _process_tiles_batches_exist(
+            process_tiles_batches,
+            config,
+            _is_https_without_ls(config.output_reader.path),
+        )
+    elif output_tiles_batches:
+        yield from _output_tiles_batches_exist(
+            output_tiles_batches,
+            config,
+            _is_https_without_ls(config.output_reader.path),
+        )
+
+
+def _is_https_without_ls(path: MPath, default_file: str = "metadata.json") -> bool:
     # Some HTTP endpoints won't allow ls() on them, so we will have to
     # request tile by tile in order to determine whether they exist or not.
     # This flag will trigger this further down.
     is_https_without_ls = False
-    if "https" in config.output_reader.path.protocols:
+    if "https" in path.protocols:
         try:
-            config.output_reader.path.ls()
+            path.ls()
         except FileNotFoundError:  # pragma: no cover
-            metadata_json = config.output_reader.path / "metadata.json"
+            metadata_json = path / default_file
             if not metadata_json.exists():
                 raise FileNotFoundError(
-                    f"TileDirectory does not seem to exist or metadata.json is not available: {config.output_reader.path}"
+                    f"TileDirectory does not seem to exist or {default_file} is not available: {path}"
                 )
             is_https_without_ls = True
-
-    if process_tiles_batches:
-        yield from _process_tiles_batches_exist(
-            process_tiles_batches, config, is_https_without_ls
-        )
-    elif output_tiles_batches:
-        yield from _output_tiles_batches_exist(
-            output_tiles_batches, config, is_https_without_ls
-        )
+    return is_https_without_ls
 
 
-def _batch_tiles_by_attribute(tiles: List[BufferedTile], attribute: str = "row"):
+def _batch_tiles_by_attribute(
+    tiles: Generator[BufferedTile, None, None], attribute: str = "row"
+) -> Generator[Generator[BufferedTile, None, None], None, None]:
     ordered = defaultdict(set)
     for tile in tiles:
         ordered[getattr(tile, attribute)].add(tile)
     return ((t for t in ordered[key]) for key in sorted(list(ordered.keys())))
 
 
-def _output_tiles_batches_exist(output_tiles_batches, config, is_https_without_ls):
-    with Executor(concurrency="threads") as executor:
+def _output_tiles_batches_exist(
+    output_tiles_batches: Generator[Generator[BufferedTile, None, None], None, None],
+    config,
+    is_https_without_ls,
+):
+    with Executor(concurrency=mapchete_options.tiles_exist_concurrency) as executor:
         for batch in executor.as_completed(
             _output_tiles_batch_exists,
             (list(b) for b in output_tiles_batches),
@@ -763,7 +911,7 @@ def _output_tiles_batch_exists(tiles, config, is_https_without_ls):
             for output_tile in tiles
         }
         # iterate through output tile rows and determine existing output tiles
-        existing_tiles = _existing_tiles(
+        existing_tiles = _existing_output_tiles(
             output_rows=[tiles[0].row],
             output_paths=output_paths,
             config=config,
@@ -776,7 +924,7 @@ def _output_tiles_batch_exists(tiles, config, is_https_without_ls):
 
 
 def _process_tiles_batches_exist(process_tiles_batches, config, is_https_without_ls):
-    with Executor(concurrency="threads") as executor:
+    with Executor(concurrency=mapchete_options.tiles_exist_concurrency) as executor:
         for batch in executor.as_completed(
             _process_tiles_batch_exists,
             (list(b) for b in process_tiles_batches),
@@ -786,35 +934,46 @@ def _process_tiles_batches_exist(process_tiles_batches, config, is_https_without
 
 
 def _process_tiles_batch_exists(tiles, config, is_https_without_ls):
+    def _all_output_tiles_exist(process_tile, existing_output_tiles):
+        # a process tile only exists if all of its output tiles exist
+        for output_tile in config.output_pyramid.intersecting(process_tile):
+            if output_tile not in existing_output_tiles:
+                return False
+        else:
+            return True
+
     if tiles:
         zoom = tiles[0].zoom
         # determine output tile rows
         output_rows = sorted(
             list(set(t.row for t in config.output_pyramid.intersecting(tiles[0])))
         )
-        # determine output paths
+        # determine all output paths
         output_paths = {
-            config.output_reader.get_path(output_tile).crop(-3): process_tile
+            config.output_reader.get_path(output_tile).crop(-3): output_tile
             for process_tile in tiles
             for output_tile in config.output_pyramid.intersecting(process_tile)
         }
         # iterate through output tile rows and determine existing process tiles
-        existing_tiles = _existing_tiles(
+        existing_output_tiles = _existing_output_tiles(
             output_rows=output_rows,
             output_paths=output_paths,
             config=config,
             zoom=zoom,
             is_https_without_ls=is_https_without_ls,
         )
-        return [(tile, tile in existing_tiles) for tile in tiles]
+        return [
+            (tile, _all_output_tiles_exist(tile, existing_output_tiles))
+            for tile in tiles
+        ]
     else:  # pragma: no cover
         return []
 
 
-def _existing_tiles(
-    output_rows=None,
-    output_paths=None,
-    config=None,
+def _existing_output_tiles(
+    output_rows: List[BufferedTile],
+    output_paths: dict,
+    config,
     zoom=None,
     is_https_without_ls=False,
 ):
@@ -845,8 +1004,7 @@ def _existing_tiles(
 
 def fs_from_path(path: MPathLike, **kwargs) -> fsspec.AbstractFileSystem:
     """Guess fsspec FileSystem from path and initialize using the desired options."""
-    path = path if isinstance(path, MPath) else MPath(path, **kwargs)
-    return path.fs
+    return path.fs if isinstance(path, MPath) else MPath(path, **kwargs).fs
 
 
 def batch_sort_property(tile_path_schema: str) -> str:

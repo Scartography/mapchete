@@ -2,6 +2,7 @@
 
 from mapchete.io._json import read_json, write_json
 from mapchete.io._misc import (
+    MatchingMethod,
     copy,
     get_best_zoom_level,
     get_boto3_bucket,
@@ -9,7 +10,6 @@ from mapchete.io._misc import (
     tile_to_zoom_level,
 )
 from mapchete.io.raster import rasterio_open
-from mapchete.io.settings import GDAL_HTTP_OPTS
 from mapchete.io.vector import fiona_open
 from mapchete.path import (
     MPath,
@@ -21,21 +21,22 @@ from mapchete.path import (
     relative_path,
     tiles_exist,
 )
+from mapchete.settings import GDALHTTPOptions
 
 __all__ = [
     "copy",
     "fs_from_path",
-    "GDAL_HTTP_OPTS",
+    "GDALHTTPOptions",
     "get_best_zoom_level",
     "get_segmentize_value",
     "tile_to_zoom_level",
+    "MatchingMethod",
     "path_is_remote",
     "path_exists",
     "tiles_exist",
     "absolute_path",
     "relative_path",
     "makedirs",
-    "Path",
     "write_json",
     "read_json",
     "get_boto3_bucket",

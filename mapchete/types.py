@@ -1,5 +1,57 @@
-from shapely.geometry import shape
-from shapely.geometry.base import BaseGeometry
+from __future__ import annotations
+
+import os
+from typing import Iterable, List, Optional, Tuple, Union
+
+from affine import Affine
+from fiona.crs import CRS as FionaCRS  # type: ignore
+from pydantic import BaseModel
+from rasterio.crs import CRS as RasterioCRS
+from rasterio.enums import Resampling
+from rasterio.transform import array_bounds, from_bounds
+from shapely.geometry import (
+    GeometryCollection,
+    LinearRing,
+    LineString,
+    MultiLineString,
+    MultiPoint,
+    MultiPolygon,
+    Point,
+    Polygon,
+    shape,
+)
+from tilematrix import Shape
+
+from mapchete.tile import BufferedTile
+
+Geometry = Union[
+    Point,
+    MultiPoint,
+    LineString,
+    MultiLineString,
+    LinearRing,
+    Polygon,
+    MultiPolygon,
+    GeometryCollection,
+]
+
+MPathLike = Union[str, os.PathLike]
+BoundsLike = Union[List[float], Tuple[float, float, float, float], dict, Geometry]
+ShapeLike = Union[Shape, List[int], Tuple[int, int]]
+ZoomLevelsLike = Union[List[int], int, dict]
+TileLike = Union[BufferedTile, Tuple[int, int, int]]
+CRSLike = Union[FionaCRS, RasterioCRS]
+NodataVal = Optional[float]
+NodataVals = Union[List[NodataVal], NodataVal]
+ResamplingLike = Union[Resampling, str]
+BandIndex = int
+BandIndexes = Union[BandIndex, List[BandIndex]]
+
+
+def to_resampling(resampling: ResamplingLike) -> Resampling:
+    if isinstance(resampling, Resampling):
+        return resampling
+    return Resampling[resampling]
 
 
 class Bounds(list):
@@ -7,14 +59,23 @@ class Bounds(list):
     Class to handle geographic bounds.
     """
 
-    left: float = None
-    bottom: float = None
-    right: float = None
-    top: float = None
-    height: float = None
-    width: float = None
+    left: float
+    bottom: float
+    right: float
+    top: float
+    height: float
+    width: float
+    crs: Optional[CRSLike] = None
 
-    def __init__(self, left=None, bottom=None, right=None, top=None, strict=True):
+    def __init__(
+        self,
+        left: Union[Iterable[float], float],
+        bottom: Optional[float],
+        right: Optional[float],
+        top: Optional[float],
+        strict: bool = True,
+        crs: Optional[CRSLike] = None,
+    ):
         self._set_attributes(left, bottom, right, top)
         for value in self:
             if not isinstance(value, (int, float)):
@@ -28,6 +89,7 @@ class Bounds(list):
                 raise ValueError("top must be larger than bottom")
         self.height = self.top - self.bottom
         self.width = self.right - self.left
+        self.crs = crs
 
     def __iter__(self):
         yield self.left
@@ -83,32 +145,66 @@ class Bounds(list):
             ],
         }
 
-    def _set_attributes(self, left, bottom, right, top):
+    def _set_attributes(
+        self,
+        left: Union[Iterable[float], float],
+        bottom: Optional[float],
+        right: Optional[float],
+        top: Optional[float],
+    ) -> None:
         """This method is important when Bounds instances are passed on to the ProcessConfig schema."""
-        if hasattr(left, "__iter__"):
+        if hasattr(left, "__iter__"):  # pragma: no cover
             self.left, self.bottom, self.right, self.top = [i for i in left]
         else:
             self.left, self.bottom, self.right, self.top = left, bottom, right, top
 
     @property
-    def geometry(self):
+    def geometry(self) -> Geometry:
         return shape(self)
 
+    # save this for later when rewriting tests for this module
+    # def latlon_geometry(
+    #     self, crs: Optional[CRSLike] = None, width_threshold: float = 180.0
+    # ) -> Geometry:
+    #     """
+    #     Will create a MultiPolygon if bounds overlap with Antimeridian.
+    #     """
+    #     from mapchete.geometry.latlon import transform_to_latlon
+
+    #     crs = crs or self.crs
+    #     if crs is None:
+    #         raise ValueError(
+    #             "crs or Bounds.crs must be set in order to generate latlon_geometry."
+    #         )
+    #     bounds = Bounds.from_inp(
+    #         transform_to_latlon(shape(self), self.crs, width_threshold=width_threshold)
+    #     )
+    #     if bounds.left < -180:
+    #         part1 = Bounds(-180, bounds.bottom, bounds.right, bounds.top)
+    #         part2 = Bounds(bounds.left + 360, bounds.bottom, 180, bounds.top)
+    #         return unary_union([shape(part1), shape(part2)])
+    #     elif bounds.right > 180:
+    #         part1 = Bounds(-180, bounds.bottom, bounds.right - 360, bounds.top)
+    #         part2 = Bounds(bounds.left, bounds.bottom, 180, bounds.top)
+    #         return unary_union([shape(part1), shape(part2)])
+    #     else:
+    #         return shape(bounds)
+
     @classmethod
-    def from_inp(cls, inp, strict=True):
+    def from_inp(cls, inp: BoundsLike, strict: bool = True) -> Bounds:
         if isinstance(inp, (list, tuple)):
             if len(inp) != 4:
                 raise ValueError("Bounds must be initialized with exactly four values.")
             return Bounds(*inp, strict=strict)
         elif isinstance(inp, dict):
             return Bounds.from_dict(inp, strict=strict)
-        elif isinstance(inp, BaseGeometry):
+        elif isinstance(inp, Geometry):
             return Bounds(*inp.bounds, strict=strict)
         else:
             raise TypeError(f"cannot create Bounds using {inp}")
 
     @staticmethod
-    def from_dict(inp, strict=True):
+    def from_dict(inp: dict, strict: bool = True) -> Bounds:
         return Bounds(**inp, strict=strict)
 
     def to_dict(self) -> dict:
@@ -120,7 +216,7 @@ class Bounds(list):
             "top": self.top,
         }
 
-    def intersects(self, other) -> bool:
+    def intersects(self, other: BoundsLike) -> bool:
         """Indicate whether bounds intersect spatially."""
         other = other if isinstance(other, Bounds) else Bounds.from_inp(other)
         horizontal = (
@@ -148,7 +244,12 @@ class ZoomLevels(list):
     min: int = None
     max: int = None
 
-    def __init__(self, min=None, max=None, descending=False):
+    def __init__(
+        self,
+        min: Union[List[int], int],
+        max: Optional[int] = None,
+        descending: bool = False,
+    ):
         self._set_attributes(min, max)
         # assert that min and max are positive integers
         for key, value in [("min", self.min), ("max", self.max)]:
@@ -192,9 +293,11 @@ class ZoomLevels(list):
     def __contains__(self, value):
         return value in list(self)
 
-    def _set_attributes(self, minlevel, maxlevel):
+    def _set_attributes(
+        self, minlevel: Union[List[int], int], maxlevel: Optional[int] = None
+    ) -> None:
         """This method is important when ZoomLevel instances are passed on to the ProcessConfig schema."""
-        if hasattr(minlevel, "__iter__"):
+        if hasattr(minlevel, "__iter__"):  # pragma: no cover
             zoom_list = [i for i in minlevel]
             self.min = min(zoom_list)
             self.max = max(zoom_list)
@@ -202,7 +305,9 @@ class ZoomLevels(list):
             self.min, self.max = minlevel, maxlevel
 
     @classmethod
-    def from_inp(cls, min=None, max=None, descending=False):
+    def from_inp(
+        cls, min: ZoomLevelsLike, max: Optional[int] = None, descending: bool = False
+    ) -> ZoomLevels:
         """Constructs ZoomLevels from various input forms"""
         if isinstance(min, int) and max is None:
             return cls.from_int(min, descending=descending)
@@ -219,11 +324,11 @@ class ZoomLevels(list):
             raise TypeError(f"cannot create ZoomLevels with min={min}, max={max}")
 
     @staticmethod
-    def from_int(inp, **kwargs):
+    def from_int(inp: int, **kwargs) -> ZoomLevels:
         return ZoomLevels(min=inp, max=inp, **kwargs)
 
     @staticmethod
-    def from_list(inp, **kwargs):
+    def from_list(inp: List[int], **kwargs) -> ZoomLevels:
         if len(inp) == 0:
             raise ValueError("zoom level list is empty")
         elif len(inp) == 1:
@@ -238,7 +343,7 @@ class ZoomLevels(list):
             return ZoomLevels(min=min(inp), max=max(inp), **kwargs)
 
     @staticmethod
-    def from_dict(inp, **kwargs):
+    def from_dict(inp: dict, **kwargs) -> ZoomLevels:
         try:
             return ZoomLevels(min=inp["min"], max=inp["max"], **kwargs)
         except KeyError:
@@ -250,19 +355,80 @@ class ZoomLevels(list):
             "max": self.max,
         }
 
-    def intersection(self, other) -> "ZoomLevels":
+    def intersection(self, other: ZoomLevelsLike) -> ZoomLevels:
         other = other if isinstance(other, ZoomLevels) else ZoomLevels(other)
         intersection = set(self).intersection(set(other))
         if len(intersection) == 0:
             raise ValueError("ZoomLevels do not intersect")
         return ZoomLevels(min(intersection), max(intersection))
 
-    def intersects(self, other) -> bool:
+    def difference(self, other: ZoomLevelsLike) -> ZoomLevels:
+        other = other if isinstance(other, ZoomLevels) else ZoomLevels(other)
+        difference = set(self).difference(set(other))
+        if len(difference) == 0:  # pragma: no cover
+            raise ValueError("ZoomLevels do not differ")
+        return ZoomLevels(min(difference), max(difference))
+
+    def intersects(self, other: ZoomLevelsLike) -> bool:
         other = other if isinstance(other, ZoomLevels) else ZoomLevels(other)
         try:
             return len(self.intersection(other)) > 0
         except ValueError:
             return False
 
-    def descending(self) -> "ZoomLevels":
+    def descending(self) -> ZoomLevels:
         return ZoomLevels(min=self.min, max=self.max, descending=True)
+
+
+class Progress(BaseModel):
+    current: int = 0
+    total: Optional[int] = None
+
+
+class Grid:
+    transform: Affine
+    height: int
+    width: int
+    crs: CRSLike
+    bounds: Bounds
+    shape: Shape
+
+    def __init__(self, transform: Affine, height: int, width: int, crs: CRSLike):
+        self.transform = transform
+        self.height = height
+        self.width = width
+        self.crs = crs
+        self.bounds = Bounds(*array_bounds(self.height, self.width, self.transform))
+        self.shape = Shape(self.height, self.width)
+
+    @staticmethod
+    def from_obj(obj):  # pragma: no cover
+        if hasattr(obj, "transform"):
+            transform = obj.transform
+        else:
+            transform = obj.affine
+        return Grid(transform, obj.height, obj.width, obj.crs)
+
+    @staticmethod
+    def from_bounds(bounds: BoundsLike, shape: ShapeLike, crs: CRSLike) -> Grid:
+        shape = Shape(*shape)
+        bounds = Bounds.from_inp(bounds)
+        transform = from_bounds(
+            bounds.left,
+            bounds.bottom,
+            bounds.right,
+            bounds.top,
+            shape.width,
+            shape.height,
+        )
+        return Grid(transform, shape.height, shape.width, crs)
+
+    def to_dict(self):  # pragma: no cover
+        return dict(
+            transform=self.transform,
+            height=self.height,
+            width=self.width,
+            crs=self.crs,
+            bounds=self.bounds,
+            shape=self.shape,
+        )

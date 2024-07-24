@@ -7,10 +7,9 @@ correctly.
 """
 import logging
 import sys
-import warnings
 from itertools import chain
 
-from mapchete._registered import drivers, processes
+from mapchete.registered import drivers, processes
 
 all_mapchete_packages = set(v.value.split(".")[0] for v in chain(drivers, processes))
 
@@ -99,24 +98,3 @@ def setup_logfile(logfile):
     for i in all_mapchete_packages:
         logging.getLogger(i).addHandler(file_handler)
         logging.getLogger(i).setLevel(logging.DEBUG)
-
-
-def user_process_logger(pname):
-    """Logger to be used within a user process file."""
-    warnings.warn(
-        DeprecationWarning(
-            "user_process_logger() deprecated, you can use standard logging module "
-            "instead."
-        )
-    )
-    return logging.getLogger("mapchete.user_process." + pname)
-
-
-def driver_logger(dname):
-    """Logger to be used from a driver plugin."""
-    warnings.warn(
-        DeprecationWarning(
-            "driver_logger() deprecated, you can use standard logging module instead."
-        )
-    )
-    return logging.getLogger("mapchete.formats.drivers." + dname)
